@@ -19,7 +19,7 @@
 
 typedef void (*lightrec_rec_func_t)(struct lightrec_cstate *, const struct block *, u16);
 
-#define EXECUTION_STATS_OFFSET(member)                                                             \
+#define STATS_OFFSET(member)                                                                       \
 	(offsetof(struct lightrec_state, execution_stats) +                                        \
 	 offsetof(struct lightrec_execution_stats, member))
 
@@ -119,9 +119,8 @@ static void lightrec_emit_end_of_block(struct lightrec_cstate *state,
 	if (has_ds && !op_flag_no_ds(op->flags) && !op_flag_local_branch(op->flags)) {
 		cycles += lightrec_cycles_of_opcode(state->state, ds->c);
 
-		/* Recompile the delay slot */
-		if (ds->c.opcode)
-			lightrec_rec_opcode(state, block, offset + 1);
+		/* Count optimized architectural NOP delay slots too. */
+		lightrec_rec_opcode(state, block, offset + 1);
 	}
 
 	/* Clean the remaining registers */
@@ -142,7 +141,7 @@ static void lightrec_emit_end_of_block(struct lightrec_cstate *state,
 		jit_movi(JIT_V1, ds->c.i.rt);
 
 		lightrec_jump_to_ds_check(state, _jit);
-	} else if (reg_new_pc < 0) {
+	} else if (reg_new_pc < 0 && !state->state->ops.block_boundary) {
 		/* We already know the target: we can try to load it directly
 		 * from the code LUT. */
 		lightrec_jump_to_known_eob(state, _jit, imm);
@@ -3066,8 +3065,8 @@ void lightrec_rec_opcode(struct lightrec_cstate *state,
 	}
 
 	if (!offset || op_flag_sync(op->flags))
-		lightrec_emit_increment_counter(state, _jit, EXECUTION_STATS_OFFSET(jit_blocks));
-	lightrec_emit_increment_counter(state, _jit, EXECUTION_STATS_OFFSET(jit_instructions));
+		lightrec_emit_increment_counter(state, _jit, STATS_OFFSET(executed_blocks));
+	lightrec_emit_increment_counter(state, _jit, STATS_OFFSET(executed_instructions));
 
 	if (likely(op->opcode)) {
 		f = rec_standard[op->i.op];

@@ -56,6 +56,15 @@ typedef int8_t  s8;
 struct lightrec_state;
 struct lightrec_mem_map;
 
+enum lightrec_block_boundary_action {
+	LIGHTREC_BLOCK_CONTINUE = 0,
+	LIGHTREC_BLOCK_STOP,
+	LIGHTREC_BLOCK_REDIRECT,
+};
+
+typedef enum lightrec_block_boundary_action (*lightrec_block_boundary_cb)(
+    struct lightrec_state *state, u32 guest_pc, u32 *redirect_pc, void *user_data);
+
 enum lightrec_fallback_reason {
 	LIGHTREC_FALLBACK_NONE = 0,
 	LIGHTREC_FALLBACK_SELF_MODIFYING_CODE,
@@ -73,12 +82,22 @@ struct lightrec_fallback_event {
 };
 
 struct lightrec_execution_stats {
-	u64 jit_blocks;
-	u64 jit_instructions;
+	union {
+		u64 executed_blocks;
+		u64 jit_blocks; /* Compatibility alias. */
+	};
+	union {
+		u64 executed_instructions;
+		u64 jit_instructions; /* Compatibility alias. */
+	};
 	u64 fallback_blocks;
 	u64 fallback_instructions;
 	u64 fallback_blocks_by_reason[LIGHTREC_FALLBACK_REASON_COUNT];
 	u64 fallback_instructions_by_reason[LIGHTREC_FALLBACK_REASON_COUNT];
+	u64 translated_blocks;
+	u64 translated_instructions;
+	u64 cache_hits;
+	u64 cache_misses;
 };
 
 /* Exit flags */
@@ -89,6 +108,7 @@ struct lightrec_execution_stats {
 #define LIGHTREC_EXIT_SEGFAULT	(1 << 3)
 #define LIGHTREC_EXIT_NOMEM	(1 << 4)
 #define LIGHTREC_EXIT_UNKNOWN_OP	(1 << 5)
+#define LIGHTREC_EXIT_BLOCK_BOUNDARY (1 << 6)
 
 /* Unsafe optimizations flags */
 #define LIGHTREC_OPT_INV_DMA_ONLY	(1 << 0)
@@ -147,6 +167,8 @@ struct lightrec_ops {
 	void (*enable_ram)(struct lightrec_state *state, _Bool enable);
 	_Bool (*hw_direct)(u32 kaddr, _Bool is_write, u8 size);
 	void (*code_inv)(void *addr, u32 len);
+	lightrec_block_boundary_cb block_boundary;
+	void *block_boundary_data;
 };
 
 struct lightrec_registers {

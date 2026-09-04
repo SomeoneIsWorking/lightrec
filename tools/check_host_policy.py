@@ -9,6 +9,7 @@ from pathlib import Path
 
 CASES = (
     ("Linux", "x86_64", "proven", "runtime contract test"),
+    ("Windows", "AMD64", "refused", "no maintained runtime-JIT proof"),
     ("Darwin", "arm64", "refused", "MAP_JIT"),
     ("Android", "arm64-v8a", "refused", "x18"),
 )
@@ -53,7 +54,7 @@ def main() -> int:
         if expected not in output or expected_reason not in output:
             print(f"host policy mismatch for {system}/{processor}: {output.strip()}")
             return 1
-    print("host policy passed: 1 proven target and 2 explicit AArch64 refusals")
+    print("host policy passed: 1 proven target and 3 explicit platform refusals")
     return 0
 
 

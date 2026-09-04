@@ -33,6 +33,10 @@ def contract_violations(
         "LIGHTREC_FALLBACK_JIT_COMPILE_FAILURE",
         "LIGHTREC_FALLBACK_UNSAFE_FETCH",
         "lightrec_execution_is_dynarec_dominated",
+        "lightrec_run_block_boundary",
+        "LIGHTREC_EXIT_BLOCK_BOUNDARY",
+        "translated_blocks",
+        "cache_misses",
     )
     for marker in required_markers:
         if marker not in runtime:
@@ -53,7 +57,10 @@ def find_violations(root: Path) -> list[str]:
         {path.name for path in root.iterdir() if path.is_file()},
         (root / "CMakeLists.txt").read_text(encoding="utf-8"),
         (root / "lightrec-config.h.cmakein").read_text(encoding="utf-8"),
-        (root / "lightrec.c").read_text(encoding="utf-8"),
+        "\n".join(
+            (root / source).read_text(encoding="utf-8")
+            for source in ("lightrec.c", "execution.c")
+        ),
     )
 
 

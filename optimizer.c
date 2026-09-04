@@ -1563,7 +1563,7 @@ static int lightrec_local_branches(struct lightrec_state *state, struct block *b
 	unsigned int i;
 	s32 offset;
 
-	for (i = 0; i < block->nb_ops; i++) {
+	for (i = 0; !state->ops.block_boundary && i < block->nb_ops; i++) {
 		list = &block->opcode_list[i];
 
 		if (should_emulate(list) || !is_local_branch(block, i))

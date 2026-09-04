@@ -18,6 +18,24 @@ counted inside the existing interpreter dispatch, while JIT block entries and
 opcodes are counted in emitted code. Explicit diagnostic-only interpretation is
 not mixed into fallback metrics.
 
+An optional `lightrec_ops.block_boundary` callback runs before every guest
+basic block reached by `lightrec_execute()`. It observes the exact next guest
+PC before cache lookup or execution. Returning `LIGHTREC_BLOCK_STOP` exits with
+`LIGHTREC_EXIT_BLOCK_BOUNDARY` and leaves that PC unexecuted. Returning
+`LIGHTREC_BLOCK_REDIRECT` replaces the block with `redirect_pc`; the redirected
+PC passes through the callback again before lookup. Hook-enabled states keep
+intra-translation control-flow targets as dispatcher boundaries, so cached and
+directly linked blocks cannot bypass the callback. The diagnostic-only
+`lightrec_run_interpreter()` entry point does not invoke this runtime hook.
+
+`translated_blocks` and `translated_instructions` count successful translation
+events, including retranslations. `executed_blocks` and
+`executed_instructions` count emitted guest work that actually ran; the old
+`jit_blocks` and `jit_instructions` names are compatibility aliases.
+`cache_hits` counts block dispatches resolved directly by the code LUT, while
+`cache_misses` counts dispatches requiring synchronous lookup, compilation, or
+bounded fallback.
+
 Consumers must publish both sides of `lightrec_execution_stats`. At minimum,
 they must refuse a “dynarec-verified” result unless
 `lightrec_execution_is_dynarec_dominated()` returns true. Stricter project
