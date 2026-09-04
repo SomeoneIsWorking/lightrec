@@ -3,28 +3,23 @@
  * Copyright (C) 2014-2021 Paul Cercueil <paul@crapouillou.net>
  */
 
+#include "lightrec.h"
 #include "arch.h"
 #include "blockcache.h"
 #include "debug.h"
 #include "disassembler.h"
 #include "emitter.h"
 #include "interpreter.h"
-#include "lightrec-config.h"
 #include "lightning-wrapper.h"
-#include "lightrec.h"
+#include "lightrec-config.h"
 #include "memmanager.h"
-#include "reaper.h"
-#include "recompiler.h"
-#include "regcache.h"
 #include "optimizer.h"
+#include "regcache.h"
 #include "tlsf/tlsf.h"
 
 #include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
-#if ENABLE_THREADED_COMPILER
-#include <stdatomic.h>
-#endif
 #include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
@@ -36,7 +31,46 @@ static bool lightrec_block_is_fully_tagged(const struct block *block);
 static void lightrec_mtc2(struct lightrec_state *state, u8 reg, u32 data);
 static u32 lightrec_mfc2(struct lightrec_state *state, u8 reg);
 
-static void lightrec_reap_block(struct lightrec_state *state, void *data);
+static void lightrec_begin_fallback(struct lightrec_state *state,
+				    enum lightrec_fallback_reason reason, u32 pc, int host_error)
+{
+	state->last_fallback.reason = reason;
+	state->last_fallback.guest_pc = pc;
+	state->last_fallback.host_error = host_error;
+	state->active_fallback_reason = reason;
+	state->execution_stats.fallback_blocks++;
+	state->execution_stats.fallback_blocks_by_reason[reason]++;
+}
+
+static u32 lightrec_fallback_block(struct lightrec_state *state, struct block *block, u32 pc,
+				   enum lightrec_fallback_reason reason, int host_error)
+{
+	u32 next_pc;
+
+	lightrec_begin_fallback(state, reason, pc, host_error);
+	next_pc = lightrec_emulate_block(state, block, pc);
+	state->active_fallback_reason = LIGHTREC_FALLBACK_NONE;
+
+	return next_pc;
+}
+
+static u32 lightrec_fallback_unsupported_control_flow(struct lightrec_state *state,
+						      struct block *block, u32 pc)
+{
+	return lightrec_fallback_block(state, block, pc, LIGHTREC_FALLBACK_UNSUPPORTED_CONTROL_FLOW,
+				       0);
+}
+
+void lightrec_record_fallback_instruction(struct lightrec_state *state)
+{
+	enum lightrec_fallback_reason reason = state->active_fallback_reason;
+
+	if (reason == LIGHTREC_FALLBACK_NONE)
+		return;
+
+	state->execution_stats.fallback_instructions++;
+	state->execution_stats.fallback_instructions_by_reason[reason]++;
+}
 
 static void lightrec_default_sb(struct lightrec_state *state, u32 opcode,
 				void *host, u32 addr, u32 data)
@@ -319,10 +353,7 @@ u32 lightrec_rw(struct lightrec_state *state, union code op, u32 base,
 			pr_debug("Opcode of block at "PC_FMT" has been tagged"
 				 " - flag for recompilation\n", block->pc);
 
-			if (ENABLE_THREADED_COMPILER)
-				lightrec_recompiler_add(state->rec, block);
-			else
-				lut_write(state, lut_offset(block->pc), NULL);
+			lut_write(state, lut_offset(block->pc), NULL);
 		}
 	}
 
@@ -701,30 +732,29 @@ static struct block * lightrec_get_block(struct lightrec_state *state, u32 pc)
 
 		old_flags = block_set_flags(block, BLOCK_IS_DEAD);
 		if (!(old_flags & BLOCK_IS_DEAD)) {
-			/* Make sure the recompiler isn't processing the block
-			 * we'll destroy */
-			if (ENABLE_THREADED_COMPILER)
-				lightrec_recompiler_remove(state->rec, block);
-
 			remove_from_code_lut(state->block_cache, block);
-
-			if (ENABLE_THREADED_COMPILER) {
-				lightrec_reaper_add(state->reaper,
-						    lightrec_reap_block, block);
-			} else {
-				lightrec_unregister_block(state->block_cache, block);
-				lightrec_free_block(state, block);
-			}
+			lightrec_unregister_block(state->block_cache, block);
+			lightrec_free_block(state, block);
 		}
 
 		block = NULL;
 	}
 
 	if (!block) {
+		if (!lightrec_get_map(state, NULL, kunseg(pc))) {
+			lightrec_begin_fallback(state, LIGHTREC_FALLBACK_UNSAFE_FETCH, pc, -EFAULT);
+			state->active_fallback_reason = LIGHTREC_FALLBACK_NONE;
+			lightrec_set_exit_flags(state, LIGHTREC_EXIT_SEGFAULT);
+			return NULL;
+		}
+
 		block = lightrec_precompile_block(state, pc);
 		if (!block) {
 			pr_err("Unable to recompile block at "PC_FMT"\n", pc);
-			lightrec_set_exit_flags(state, LIGHTREC_EXIT_SEGFAULT);
+			lightrec_begin_fallback(state, LIGHTREC_FALLBACK_JIT_COMPILE_FAILURE, pc,
+						-ENOMEM);
+			state->active_fallback_reason = LIGHTREC_FALLBACK_NONE;
+			lightrec_set_exit_flags(state, LIGHTREC_EXIT_NOMEM);
 			return NULL;
 		}
 
@@ -764,52 +794,33 @@ static void * get_next_block_func(struct lightrec_state *state, u32 pc)
 		if (unlikely(should_recompile)) {
 			pr_debug("Block at "PC_FMT" should recompile\n", pc);
 
-			if (ENABLE_THREADED_COMPILER) {
-				lightrec_recompiler_add(state->rec, block);
-			} else {
-				err = lightrec_compile_block(state->cstate, block);
-				if (err) {
-					state->exit_flags = LIGHTREC_EXIT_NOMEM;
-					return NULL;
-				}
+			err = lightrec_compile_block(state->cstate, block);
+			if (err) {
+				pc = lightrec_fallback_block(
+				    state, block, pc, LIGHTREC_FALLBACK_JIT_COMPILE_FAILURE, err);
+				func = NULL;
+				continue;
 			}
 		}
 
-		if (ENABLE_THREADED_COMPILER && likely(!should_recompile))
-			func = lightrec_recompiler_run_first_pass(state, block, &pc);
-		else
-			func = block->function;
+		func = block->function;
 
 		if (likely(func))
 			break;
 
 		if (unlikely(block_has_flag(block, BLOCK_NEVER_COMPILE))) {
-			pc = lightrec_emulate_block(state, block, pc);
-
-		} else if (!ENABLE_THREADED_COMPILER) {
-			/* Block wasn't compiled yet - run the interpreter */
-			if (block_has_flag(block, BLOCK_FULLY_TAGGED))
-				pr_debug("Block fully tagged, skipping first pass\n");
-			else if (ENABLE_FIRST_PASS && likely(!should_recompile))
-				pc = lightrec_emulate_block(state, block, pc);
-
-			/* Then compile it using the profiled data */
+			pc = lightrec_fallback_block(state, block, pc,
+						     LIGHTREC_FALLBACK_SELF_MODIFYING_CODE, 0);
+		} else {
+			/* Cold blocks compile synchronously before any guest opcode
+			 * executes. */
 			err = lightrec_compile_block(state->cstate, block);
 			if (err) {
-				state->exit_flags = LIGHTREC_EXIT_NOMEM;
-				return NULL;
+				pc = lightrec_fallback_block(
+				    state, block, pc, LIGHTREC_FALLBACK_JIT_COMPILE_FAILURE, err);
+			} else {
+				func = block->function;
 			}
-		} else if (unlikely(block_has_flag(block, BLOCK_IS_DEAD))) {
-			/*
-			 * If the block is dead but has never been compiled,
-			 * then its function pointer is NULL and we cannot
-			 * execute the block. In that case, reap all the dead
-			 * blocks now, and in the next loop we will create a
-			 * new block.
-			 */
-			lightrec_reaper_reap(state->reaper);
-		} else {
-			lightrec_recompiler_add(state->rec, block);
 		}
 	} while (state->exit_flags == LIGHTREC_EXIT_NORMAL
 		 && state->current_cycle < state->target_cycle);
@@ -820,17 +831,7 @@ static void * get_next_block_func(struct lightrec_state *state, u32 pc)
 
 static void * lightrec_alloc_code(struct lightrec_state *state, size_t size)
 {
-	void *code;
-
-	if (ENABLE_THREADED_COMPILER)
-		lightrec_code_alloc_lock(state);
-
-	code = tlsf_malloc(state->tlsf, size);
-
-	if (ENABLE_THREADED_COMPILER)
-		lightrec_code_alloc_unlock(state);
-
-	return code;
+	return tlsf_malloc(state->tlsf, size);
 }
 
 static void lightrec_realloc_code(struct lightrec_state *state,
@@ -839,24 +840,12 @@ static void lightrec_realloc_code(struct lightrec_state *state,
 	/* NOTE: 'size' MUST be smaller than the size specified during
 	 * the allocation. */
 
-	if (ENABLE_THREADED_COMPILER)
-		lightrec_code_alloc_lock(state);
-
 	tlsf_realloc(state->tlsf, ptr, size);
-
-	if (ENABLE_THREADED_COMPILER)
-		lightrec_code_alloc_unlock(state);
 }
 
 static void lightrec_free_code(struct lightrec_state *state, void *ptr)
 {
-	if (ENABLE_THREADED_COMPILER)
-		lightrec_code_alloc_lock(state);
-
 	tlsf_free(state->tlsf, ptr);
-
-	if (ENABLE_THREADED_COMPILER)
-		lightrec_code_alloc_unlock(state);
 }
 
 static char lightning_code_data[0x80000];
@@ -888,14 +877,6 @@ static void * lightrec_emit_code(struct lightrec_state *state,
 		code = lightrec_alloc_code(state, (size_t) code_size);
 
 		if (!code) {
-			if (ENABLE_THREADED_COMPILER) {
-				/* If we're using the threaded compiler, return
-				 * an allocation error here. The threaded
-				 * compiler will then empty its job queue and
-				 * request a code flush using the reaper. */
-				return NULL;
-			}
-
 			/* Remove outdated blocks, and try again */
 			lightrec_remove_outdated_blocks(state->block_cache, block);
 
@@ -1062,7 +1043,9 @@ static u32 lightrec_check_load_delay(struct lightrec_state *state, u32 pc, u8 re
 			lightrec_set_exit_flags(state, LIGHTREC_EXIT_SEGFAULT);
 			pc = 0;
 		} else {
+			lightrec_begin_fallback(state, LIGHTREC_FALLBACK_LOAD_DELAY_HAZARD, pc, 0);
 			pc = lightrec_handle_load_delay(state, block, pc, reg);
+			state->active_fallback_reason = LIGHTREC_FALLBACK_NONE;
 		}
 	}
 
@@ -1175,15 +1158,13 @@ static struct block * generate_dispatcher(struct lightrec_state *state)
 
 	jit_patch(to_slow_path);
 
-	/* The code LUT will be set to this address when the block at the target
-	 * PC has been preprocessed but not yet compiled by the threaded
-	 * recompiler */
+	/* Cold or invalidated blocks enter the synchronous compiler here. */
 	addr = jit_indirect();
 
 	/* Slow path: call C function get_next_block_func() */
 
-	if (ENABLE_FIRST_PASS || OPT_DETECT_IMPOSSIBLE_BRANCHES) {
-		/* We may call the interpreter - update state->current_cycle */
+	if (OPT_DETECT_IMPOSSIBLE_BRANCHES) {
+		/* A difficult branch may execute the bounded fallback. */
 		update_cycle_counter_before_c(_jit);
 	}
 
@@ -1192,16 +1173,15 @@ static struct block * generate_dispatcher(struct lightrec_state *state)
 	jit_pushargr(JIT_V0);
 
 	/* Save the cycles register if needed */
-	if (!(ENABLE_FIRST_PASS || OPT_DETECT_IMPOSSIBLE_BRANCHES))
+	if (!OPT_DETECT_IMPOSSIBLE_BRANCHES)
 		jit_movr(JIT_V0, LIGHTREC_REG_CYCLE);
 
 	/* Get the next block */
 	jit_finishi(&get_next_block_func);
 	jit_retval(JIT_V1);
 
-	if (ENABLE_FIRST_PASS || OPT_DETECT_IMPOSSIBLE_BRANCHES) {
-		/* The interpreter may have updated state->current_cycle and
-		 * state->target_cycle - recalc the delta */
+	if (OPT_DETECT_IMPOSSIBLE_BRANCHES) {
+		/* The fallback may have updated the cycle counters. */
 		update_cycle_counter_after_c(_jit);
 	} else {
 		jit_movr(LIGHTREC_REG_CYCLE, JIT_V0);
@@ -1255,7 +1235,7 @@ static struct block * generate_dispatcher(struct lightrec_state *state)
 		jit_pushargr(LIGHTREC_REG_STATE);
 		jit_pushargr(JIT_V1);
 		jit_pushargr(JIT_V0);
-		jit_finishi(lightrec_emulate_block);
+		jit_finishi(lightrec_fallback_unsupported_control_flow);
 
 		jit_retval(JIT_V0);
 
@@ -1516,20 +1496,6 @@ static bool lightrec_block_is_fully_tagged(const struct block *block)
 	return true;
 }
 
-static void lightrec_reap_block(struct lightrec_state *state, void *data)
-{
-	struct block *block = data;
-
-	pr_debug("Reap dead block at "PC_FMT"\n", block->pc);
-	lightrec_unregister_block(state->block_cache, block);
-	lightrec_free_block(state, block);
-}
-
-static void lightrec_reap_jit(struct lightrec_state *state, void *data)
-{
-	_jit_destroy_state(data);
-}
-
 static void lightrec_free_function(struct lightrec_state *state, void *fn)
 {
 	if (ENABLE_CODE_BUFFER && state->tlsf) {
@@ -1538,21 +1504,9 @@ static void lightrec_free_function(struct lightrec_state *state, void *fn)
 	}
 }
 
-static void lightrec_reap_function(struct lightrec_state *state, void *data)
-{
-	lightrec_free_function(state, data);
-}
-
-static void lightrec_reap_opcode_list(struct lightrec_state *state, void *data)
-{
-	lightrec_free_opcode_list(state, data);
-}
-
 int lightrec_compile_block(struct lightrec_cstate *cstate,
 			   struct block *block)
 {
-	struct block *dead_blocks[ARRAY_SIZE(cstate->targets)];
-	u32 was_dead[ARRAY_SIZE(cstate->targets) / 8];
 	struct lightrec_state *state = cstate->state;
 	struct lightrec_branch_target *target;
 	bool fully_tagged = false;
@@ -1658,56 +1612,18 @@ int lightrec_compile_block(struct lightrec_cstate *cstate,
 
 	new_fn = lightrec_emit_code(state, block, _jit, &block->code_size);
 	if (!new_fn) {
-		if (!ENABLE_THREADED_COMPILER)
-			pr_err("Unable to compile block!\n");
+		pr_err("Unable to compile block!\n");
 		block->_jit = oldjit;
 		jit_clear_state();
 		_jit_destroy_state(_jit);
 		return -ENOMEM;
 	}
 
-	/* Pause the reaper, because lightrec_reset_lut_offset() may try to set
-	 * the old block->function pointer to the code LUT. */
-	if (ENABLE_THREADED_COMPILER)
-		lightrec_reaper_pause(state->reaper);
-
 	block->function = new_fn;
 	block_clear_flags(block, BLOCK_SHOULD_RECOMPILE);
 
 	/* Add compiled function to the LUT */
 	lut_write(state, lut_offset(block->pc), block->function);
-
-	/* Detect old blocks that have been covered by the new one */
-	for (i = 0; ENABLE_THREADED_COMPILER && i < cstate->nb_targets; i++) {
-		target = &cstate->targets[i];
-
-		if (!target->offset)
-			continue;
-
-		offset = block->pc + target->offset * sizeof(u32);
-
-		block2 = lightrec_find_block(state->block_cache, offset);
-		if (block2) {
-			/* No need to check if block2 is compilable - it must
-			 * be, otherwise block wouldn't be compilable either */
-
-			/* Set the "block dead" flag to prevent the dynarec from
-			 * recompiling this block */
-			old_flags = block_set_flags(block2, BLOCK_IS_DEAD);
-
-			if (old_flags & BLOCK_IS_DEAD)
-				was_dead[i / 32] |= BIT(i % 32);
-			else
-				was_dead[i / 32] &= ~BIT(i % 32);
-		}
-
-		dead_blocks[i] = block2;
-
-		/* If block2 was pending for compilation, cancel it.
-		 * If it's being compiled right now, wait until it finishes. */
-		if (block2)
-			lightrec_recompiler_remove(state->rec, block2);
-	}
 
 	for (i = 0; i < cstate->nb_targets; i++) {
 		target = &cstate->targets[i];
@@ -1721,30 +1637,17 @@ int lightrec_compile_block(struct lightrec_cstate *cstate,
 		offset = lut_offset(block->pc) + target->offset;
 		lut_write(state, offset, jit_address(target->label));
 
-		if (ENABLE_THREADED_COMPILER) {
-			block2 = dead_blocks[i];
-		} else {
-			offset = block->pc + target->offset * sizeof(u32);
-			block2 = lightrec_find_block(state->block_cache, offset);
-		}
+		offset = block->pc + target->offset * sizeof(u32);
+		block2 = lightrec_find_block(state->block_cache, offset);
 		if (block2) {
 			pr_debug("Reap block "X32_FMT" as it's covered by block "
 				 X32_FMT"\n", block2->pc, block->pc);
 
 			/* Finally, reap the block. */
-			if (!ENABLE_THREADED_COMPILER) {
-				lightrec_unregister_block(state->block_cache, block2);
-				lightrec_free_block(state, block2);
-			} else if (!(was_dead[i / 32] & BIT(i % 32))) {
-				lightrec_reaper_add(state->reaper,
-						    lightrec_reap_block,
-						    block2);
-			}
+			lightrec_unregister_block(state->block_cache, block2);
+			lightrec_free_block(state, block2);
 		}
 	}
-
-	if (ENABLE_THREADED_COMPILER)
-		lightrec_reaper_continue(state->reaper);
 
 	if (ENABLE_DISASSEMBLER) {
 		pr_debug("Compiling block at "PC_FMT"\n", block->pc);
@@ -1760,28 +1663,15 @@ int lightrec_compile_block(struct lightrec_cstate *cstate,
 		pr_debug("Block "PC_FMT" is fully tagged"
 			 " - free opcode list\n", block->pc);
 
-		if (ENABLE_THREADED_COMPILER) {
-			lightrec_reaper_add(state->reaper,
-					    lightrec_reap_opcode_list,
-					    block->opcode_list);
-		} else {
-			lightrec_free_opcode_list(state, block->opcode_list);
-		}
+		lightrec_free_opcode_list(state, block->opcode_list);
 	}
 
 	if (oldjit) {
 		pr_debug("Block "X32_FMT" recompiled, reaping old jit context.\n",
 			 block->pc);
 
-		if (ENABLE_THREADED_COMPILER) {
-			lightrec_reaper_add(state->reaper,
-					    lightrec_reap_jit, oldjit);
-			lightrec_reaper_add(state->reaper,
-					    lightrec_reap_function, old_fn);
-		} else {
-			_jit_destroy_state(oldjit);
-			lightrec_free_function(state, old_fn);
-		}
+		_jit_destroy_state(oldjit);
+		lightrec_free_function(state, old_fn);
 
 		lightrec_unregister(MEM_FOR_CODE, old_code_size);
 	}
@@ -1830,9 +1720,6 @@ u32 lightrec_execute(struct lightrec_state *state, u32 pc, u32 target_cycle)
 		state->current_cycle = state->target_cycle - cycles_delta;
 	}
 
-	if (ENABLE_THREADED_COMPILER)
-		lightrec_reaper_reap(state->reaper);
-
 	if (LOG_LEVEL >= INFO_L)
 		lightrec_print_info(state);
 
@@ -1854,8 +1741,6 @@ u32 lightrec_run_interpreter(struct lightrec_state *state, u32 pc,
 
 		pc = lightrec_emulate_block(state, block, pc);
 
-		if (ENABLE_THREADED_COMPILER)
-			lightrec_reaper_reap(state->reaper);
 	} while (state->current_cycle < state->target_cycle);
 
 	if (LOG_LEVEL >= INFO_L)
@@ -1968,19 +1853,9 @@ struct lightrec_state * lightrec_init(char *argv0,
 	if (!state->block_cache)
 		goto err_free_state;
 
-	if (ENABLE_THREADED_COMPILER) {
-		state->rec = lightrec_recompiler_init(state);
-		if (!state->rec)
-			goto err_free_block_cache;
-
-		state->reaper = lightrec_reaper_init(state);
-		if (!state->reaper)
-			goto err_free_recompiler;
-	} else {
-		state->cstate = lightrec_create_cstate(state);
-		if (!state->cstate)
-			goto err_free_block_cache;
-	}
+	state->cstate = lightrec_create_cstate(state);
+	if (!state->cstate)
+		goto err_free_block_cache;
 
 	state->nb_maps = nb;
 	state->maps = maps;
@@ -1989,7 +1864,7 @@ struct lightrec_state * lightrec_init(char *argv0,
 
 	state->dispatcher = generate_dispatcher(state);
 	if (!state->dispatcher)
-		goto err_free_reaper;
+		goto err_free_cstate;
 
 	state->c_wrapper_block = generate_wrapper(state);
 	if (!state->c_wrapper_block)
@@ -2035,14 +1910,8 @@ struct lightrec_state * lightrec_init(char *argv0,
 
 err_free_dispatcher:
 	lightrec_free_block(state, state->dispatcher);
-err_free_reaper:
-	if (ENABLE_THREADED_COMPILER)
-		lightrec_reaper_destroy(state->reaper);
-err_free_recompiler:
-	if (ENABLE_THREADED_COMPILER)
-		lightrec_free_recompiler(state->rec);
-	else
-		lightrec_free_cstate(state->cstate);
+err_free_cstate:
+	lightrec_free_cstate(state->cstate);
 err_free_block_cache:
 	lightrec_free_block_cache(state->block_cache);
 err_free_state:
@@ -2066,12 +1935,7 @@ void lightrec_destroy(struct lightrec_state *state)
 	lightrec_free_block(state, state->dispatcher);
 	lightrec_free_block(state, state->c_wrapper_block);
 
-	if (ENABLE_THREADED_COMPILER) {
-		lightrec_free_recompiler(state->rec);
-		lightrec_reaper_destroy(state->reaper);
-	} else {
-		lightrec_free_cstate(state->cstate);
-	}
+	lightrec_free_cstate(state->cstate);
 
 	finish_jit();
 	if (ENABLE_CODE_BUFFER && state->tlsf)
@@ -2130,6 +1994,45 @@ u32 lightrec_exit_flags(struct lightrec_state *state)
 	return state->exit_flags;
 }
 
+const struct lightrec_execution_stats *
+lightrec_get_execution_stats(const struct lightrec_state *state)
+{
+	return &state->execution_stats;
+}
+
+void lightrec_reset_execution_stats(struct lightrec_state *state)
+{
+	memset(&state->execution_stats, 0, sizeof(state->execution_stats));
+	memset(&state->last_fallback, 0, sizeof(state->last_fallback));
+}
+
+const struct lightrec_fallback_event *lightrec_get_last_fallback(const struct lightrec_state *state)
+{
+	return &state->last_fallback;
+}
+
+const char *lightrec_fallback_reason_name(enum lightrec_fallback_reason reason)
+{
+	static const char *const names[LIGHTREC_FALLBACK_REASON_COUNT] = {
+	    [LIGHTREC_FALLBACK_NONE] = "none",
+	    [LIGHTREC_FALLBACK_SELF_MODIFYING_CODE] = "self_modifying_code",
+	    [LIGHTREC_FALLBACK_UNSUPPORTED_CONTROL_FLOW] = "unsupported_control_flow",
+	    [LIGHTREC_FALLBACK_JIT_COMPILE_FAILURE] = "jit_compile_failure",
+	    [LIGHTREC_FALLBACK_LOAD_DELAY_HAZARD] = "load_delay_hazard",
+	    [LIGHTREC_FALLBACK_UNSAFE_FETCH] = "unsafe_fetch",
+	};
+
+	if ((unsigned int)reason >= LIGHTREC_FALLBACK_REASON_COUNT)
+		return "invalid";
+	return names[reason];
+}
+
+_Bool lightrec_execution_is_dynarec_dominated(const struct lightrec_state *state)
+{
+	return state->execution_stats.jit_instructions >
+	       state->execution_stats.fallback_instructions;
+}
+
 u32 lightrec_current_cycle_count(const struct lightrec_state *state)
 {
 	return state->current_cycle;
@@ -2165,14 +2068,6 @@ void lightrec_set_cycles_per_opcode(struct lightrec_state *state, u32 cycles)
 
 	state->cycles_per_op = cycles;
 
-	if (ENABLE_THREADED_COMPILER) {
-		lightrec_recompiler_pause(state->rec);
-		lightrec_reaper_reap(state->reaper);
-	}
-
 	lightrec_invalidate_all(state);
 	lightrec_free_all_blocks(state->block_cache);
-
-	if (ENABLE_THREADED_COMPILER)
-		lightrec_recompiler_unpause(state->rec);
 }

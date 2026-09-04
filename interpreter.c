@@ -57,6 +57,7 @@ static inline u32 execute(lightrec_int_func_t func, struct interpreter *inter)
 
 static inline u32 lightrec_int_op(struct interpreter *inter)
 {
+	lightrec_record_fallback_instruction(inter->state);
 	return execute(int_standard[inter->op->i.op], inter);
 }
 

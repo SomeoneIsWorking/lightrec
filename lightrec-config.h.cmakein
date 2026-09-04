@@ -6,8 +6,6 @@
 #ifndef __LIGHTREC_CONFIG_H__
 #define __LIGHTREC_CONFIG_H__
 
-#cmakedefine01 ENABLE_THREADED_COMPILER
-#cmakedefine01 ENABLE_FIRST_PASS
 #cmakedefine01 ENABLE_DISASSEMBLER
 #cmakedefine01 ENABLE_CODE_BUFFER
 
@@ -29,4 +27,3 @@
 #cmakedefine01 OPT_SH4_USE_GBR
 
 #endif /* __LIGHTREC_CONFIG_H__ */
-
