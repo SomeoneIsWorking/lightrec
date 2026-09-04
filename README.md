@@ -17,6 +17,10 @@ Consumers can report the real execution mix through
 `lightrec_get_last_fallback()`. `lightrec_execution_is_dynarec_dominated()` is
 the minimum conformance guard: a run with no JIT instructions, or at least as
 many interpreted instructions as JIT instructions, is not dynarec-dominated.
+Consumers that bound automatic fallback can install
+`lightrec_ops.fallback_admission`. The callback receives the typed reason,
+guest PC, and host error before any fallback work; refusal exits at that exact
+PC with `LIGHTREC_EXIT_FALLBACK_REFUSED` and executes no interpreter opcode.
 
 Linux x86_64 is the currently proven host. Windows x86_64, macOS arm64, and Android arm64-v8a
 are deliberately refused until the GNU Lightning and executable-memory

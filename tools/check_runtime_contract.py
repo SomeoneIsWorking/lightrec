@@ -30,6 +30,9 @@ def contract_violations(
 
     required_markers = (
         "lightrec_fallback_block",
+        "fallback_admission",
+        "LIGHTREC_EXIT_FALLBACK_REFUSED",
+        "refused_fallback_blocks",
         "LIGHTREC_FALLBACK_JIT_COMPILE_FAILURE",
         "LIGHTREC_FALLBACK_UNSAFE_FETCH",
         "lightrec_execution_is_dynarec_dominated",
@@ -41,6 +44,16 @@ def contract_violations(
     for marker in required_markers:
         if marker not in runtime:
             findings.append(f"missing measured fallback contract marker: {marker}")
+
+    admitted_entry_markers = (
+        "if (!lightrec_begin_fallback(state, reason, pc, host_error))",
+        "lightrec_begin_fallback(state, LIGHTREC_FALLBACK_UNSAFE_FETCH",
+        "lightrec_begin_fallback(state, LIGHTREC_FALLBACK_JIT_COMPILE_FAILURE",
+        "lightrec_begin_fallback(state, LIGHTREC_FALLBACK_LOAD_DELAY_HAZARD",
+    )
+    for marker in admitted_entry_markers:
+        if marker not in runtime:
+            findings.append(f"fallback route bypasses centralized admission: {marker}")
 
     direct_calls = runtime.count("lightrec_emulate_block(state, block, pc)")
     if direct_calls != 2:

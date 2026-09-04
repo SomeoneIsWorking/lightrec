@@ -13,10 +13,25 @@ executing it. A block may enter the interpreter only through a named fallback:
   and terminates with `LIGHTREC_EXIT_SEGFAULT` because no safe opcode exists to
   execute.
 
-Every attempt records a typed reason and guest PC. Executed fallback opcodes are
-counted inside the existing interpreter dispatch, while JIT block entries and
-opcodes are counted in emitted code. Explicit diagnostic-only interpretation is
-not mixed into fallback metrics.
+Every attempt records a typed reason, guest PC, and host error in the latest
+fallback event. Executed fallback opcodes are counted inside the existing
+interpreter dispatch, while JIT block entries and opcodes are counted in
+emitted code. Explicit diagnostic-only interpretation is not mixed into
+fallback metrics.
+
+An optional `lightrec_ops.fallback_admission` callback runs at the single
+fallback boundary, before fallback counters advance or any interpreter helper
+runs. It receives a borrowed `lightrec_fallback_event` and returns
+`LIGHTREC_FALLBACK_ALLOW` or `LIGHTREC_FALLBACK_REFUSE`; any value other than
+ALLOW fails closed. Refusal leaves the latest event available through
+`lightrec_get_last_fallback()`, increments `refused_fallback_blocks` and its
+per-reason counter, preserves the exact refused PC, and exits with
+`LIGHTREC_EXIT_FALLBACK_REFUSED`. It does not increment admitted fallback block
+or instruction counters. An allowed interpreter fallback advances the existing
+fallback counters and returns to the dispatcher, so subsequent blocks resume
+dynarec execution. Zero-instruction unsafe-fetch and allocation-failure events
+also pass through admission; when admitted they retain their native
+`LIGHTREC_EXIT_SEGFAULT` or `LIGHTREC_EXIT_NOMEM` result.
 
 An optional `lightrec_ops.block_boundary` callback runs before every guest
 basic block reached by `lightrec_execute()`. It observes the exact next guest
@@ -36,8 +51,8 @@ events, including retranslations. `executed_blocks` and
 `cache_misses` counts dispatches requiring synchronous lookup, compilation, or
 bounded fallback.
 
-Consumers must publish both sides of `lightrec_execution_stats`. At minimum,
-they must refuse a “dynarec-verified” result unless
+Consumers must publish JIT, admitted fallback, and refused fallback totals from
+`lightrec_execution_stats`. At minimum, they must refuse a “dynarec-verified” result unless
 `lightrec_execution_is_dynarec_dominated()` returns true. Stricter project
 thresholds are expected for performance qualification.
 
