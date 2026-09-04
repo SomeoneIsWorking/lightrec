@@ -18,6 +18,21 @@ struct fixture {
 	u8 *scratch;
 };
 
+enum boundary_test_mode {
+	BOUNDARY_CONTINUE,
+	BOUNDARY_STOP_AT_PC,
+	BOUNDARY_REDIRECT_AT_PC,
+};
+
+struct boundary_test_context {
+	enum boundary_test_mode mode;
+	u32 match_pc;
+	u32 redirect_pc;
+	u32 observed_pcs[8];
+	u32 observed_cycles[8];
+	unsigned int call_count;
+};
+
 static void fixture_destroy(struct fixture *fixture)
 {
 	if (fixture->state)
@@ -40,11 +55,35 @@ static void enable_ram(struct lightrec_state *state, _Bool enable)
 	(void)enable;
 }
 
-static int fixture_init(struct fixture *fixture)
+static enum lightrec_block_boundary_action
+block_boundary(struct lightrec_state *state, u32 guest_pc, u32 *redirect_pc, void *user_data)
+{
+	struct boundary_test_context *context = user_data;
+
+	if (context->call_count <
+	    sizeof(context->observed_pcs) / sizeof(context->observed_pcs[0])) {
+		context->observed_pcs[context->call_count] = guest_pc;
+		context->observed_cycles[context->call_count] = lightrec_current_cycle_count(state);
+	}
+	context->call_count++;
+
+	if (context->mode == BOUNDARY_STOP_AT_PC && guest_pc == context->match_pc)
+		return LIGHTREC_BLOCK_STOP;
+	if (context->mode == BOUNDARY_REDIRECT_AT_PC && guest_pc == context->match_pc) {
+		*redirect_pc = context->redirect_pc;
+		return LIGHTREC_BLOCK_REDIRECT;
+	}
+	return LIGHTREC_BLOCK_CONTINUE;
+}
+
+static int fixture_init_with_boundary(struct fixture *fixture,
+				      struct boundary_test_context *boundary_context)
 {
 	const struct lightrec_ops ops = {
 	    .cop2_op = cop2_op,
 	    .enable_ram = enable_ram,
+	    .block_boundary = boundary_context ? block_boundary : NULL,
+	    .block_boundary_data = boundary_context,
 	};
 
 	*fixture = (struct fixture){0};
@@ -79,6 +118,11 @@ static int fixture_init(struct fixture *fixture)
 		return -1;
 	}
 	return 0;
+}
+
+static int fixture_init(struct fixture *fixture)
+{
+	return fixture_init_with_boundary(fixture, NULL);
 }
 
 static _Bool fallback_totals_match(const struct lightrec_execution_stats *stats)
@@ -215,6 +259,114 @@ static int test_diagnostic_interpreter_is_explicit_and_unmixed(void)
 	return 0;
 }
 
+static int test_boundary_callback_observes_cache_hit(void)
+{
+	struct boundary_test_context boundary = {.mode = BOUNDARY_CONTINUE};
+	const struct lightrec_execution_stats *stats;
+	struct fixture fixture;
+	u64 first_translations;
+	u32 target_cycle;
+
+	if (fixture_init_with_boundary(&fixture, &boundary))
+		return 1;
+	fixture.ram[0] = 0x2402002a; /* addiu $v0, $zero, 42 */
+	fixture.ram[1] = 0x0000000c; /* syscall */
+
+	lightrec_execute(fixture.state, 0, 100);
+	stats = lightrec_get_execution_stats(fixture.state);
+	first_translations = stats->translated_blocks;
+	target_cycle = lightrec_current_cycle_count(fixture.state) + 100;
+	lightrec_execute(fixture.state, 0, target_cycle);
+	stats = lightrec_get_execution_stats(fixture.state);
+
+	if (boundary.call_count != 2 || boundary.observed_pcs[0] != 0 ||
+	    boundary.observed_pcs[1] != 0 || first_translations != 1 ||
+	    stats->translated_blocks != 1 || stats->cache_misses != 1 || stats->cache_hits != 1 ||
+	    stats->executed_blocks != 2 || stats->executed_instructions != 4) {
+		fputs("block-boundary cache-hit contract failed\n", stderr);
+		fixture_destroy(&fixture);
+		return 1;
+	}
+
+	fixture_destroy(&fixture);
+	return 0;
+}
+
+static int test_boundary_stop_precedes_lookup_and_execution(void)
+{
+	struct boundary_test_context boundary = {
+	    .mode = BOUNDARY_STOP_AT_PC,
+	    .match_pc = 0x10,
+	};
+	const struct lightrec_execution_stats *stats;
+	struct lightrec_registers *registers;
+	struct fixture fixture;
+	u32 next_pc;
+
+	if (fixture_init_with_boundary(&fixture, &boundary))
+		return 1;
+	fixture.ram[0] = 0x08000004; /* j 0x10 */
+	fixture.ram[1] = 0x00000000; /* nop */
+	fixture.ram[4] = 0x2402002a; /* stopped: addiu $v0, $zero, 42 */
+	fixture.ram[5] = 0x0000000c; /* syscall */
+
+	next_pc = lightrec_execute(fixture.state, 0, 100);
+	stats = lightrec_get_execution_stats(fixture.state);
+	registers = lightrec_get_registers(fixture.state);
+	if (next_pc != 0x10 || boundary.call_count != 2 || boundary.observed_pcs[0] != 0 ||
+	    boundary.observed_pcs[1] != 0x10 || boundary.observed_cycles[0] != 0 ||
+	    boundary.observed_cycles[1] != 4 || registers->gpr[2] != 0 ||
+	    !(lightrec_exit_flags(fixture.state) & LIGHTREC_EXIT_BLOCK_BOUNDARY) ||
+	    stats->translated_blocks != 1 || stats->executed_blocks != 1 ||
+	    stats->executed_instructions != 2 || stats->cache_hits != 0 ||
+	    stats->cache_misses != 1) {
+		fputs("block-boundary stop did not precede lookup and execution\n", stderr);
+		fixture_destroy(&fixture);
+		return 1;
+	}
+
+	fixture_destroy(&fixture);
+	return 0;
+}
+
+static int test_boundary_redirect_replaces_direct_target(void)
+{
+	struct boundary_test_context boundary = {
+	    .mode = BOUNDARY_REDIRECT_AT_PC,
+	    .match_pc = 0x10,
+	    .redirect_pc = 0x20,
+	};
+	const struct lightrec_execution_stats *stats;
+	struct lightrec_registers *registers;
+	struct fixture fixture;
+
+	if (fixture_init_with_boundary(&fixture, &boundary))
+		return 1;
+	fixture.ram[0] = 0x08000004; /* j 0x10 */
+	fixture.ram[1] = 0x00000000; /* nop */
+	fixture.ram[4] = 0x24020001; /* replaced: addiu $v0, $zero, 1 */
+	fixture.ram[5] = 0x0000000c; /* syscall */
+	fixture.ram[8] = 0x2402002a; /* replacement: addiu $v0, $zero, 42 */
+	fixture.ram[9] = 0x0000000c; /* syscall */
+
+	lightrec_execute(fixture.state, 0, 100);
+	stats = lightrec_get_execution_stats(fixture.state);
+	registers = lightrec_get_registers(fixture.state);
+	if (boundary.call_count != 3 || boundary.observed_pcs[0] != 0 ||
+	    boundary.observed_pcs[1] != 0x10 || boundary.observed_pcs[2] != 0x20 ||
+	    boundary.observed_cycles[0] != 0 || boundary.observed_cycles[1] != 4 ||
+	    boundary.observed_cycles[2] != 4 || registers->gpr[2] != 42 ||
+	    stats->translated_blocks != 2 || stats->cache_misses != 2 ||
+	    stats->executed_blocks != 2 || stats->executed_instructions != 4) {
+		fputs("block-boundary redirect/direct-target contract failed\n", stderr);
+		fixture_destroy(&fixture);
+		return 1;
+	}
+
+	fixture_destroy(&fixture);
+	return 0;
+}
+
 int main(void)
 {
 	if (test_cold_block_jits_without_fallback())
@@ -224,6 +376,12 @@ int main(void)
 	if (test_unsafe_fetch_is_not_silent())
 		return 1;
 	if (test_diagnostic_interpreter_is_explicit_and_unmixed())
+		return 1;
+	if (test_boundary_callback_observes_cache_hit())
+		return 1;
+	if (test_boundary_stop_precedes_lookup_and_execution())
+		return 1;
+	if (test_boundary_redirect_replaces_direct_target())
 		return 1;
 	return 0;
 }

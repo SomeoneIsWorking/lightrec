@@ -9,6 +9,7 @@
 #include "debug.h"
 #include "disassembler.h"
 #include "emitter.h"
+#include "execution.h"
 #include "interpreter.h"
 #include "lightning-wrapper.h"
 #include "lightrec-config.h"
@@ -771,6 +772,8 @@ static void * get_next_block_func(struct lightrec_state *state, u32 pc)
 	void *func;
 	int err;
 
+	state->execution_stats.cache_misses++;
+
 	do {
 		func = lut_read(state, lut_offset(pc));
 		if (func && func != state->get_next_block)
@@ -811,6 +814,7 @@ static void * get_next_block_func(struct lightrec_state *state, u32 pc)
 		if (unlikely(block_has_flag(block, BLOCK_NEVER_COMPILE))) {
 			pc = lightrec_fallback_block(state, block, pc,
 						     LIGHTREC_FALLBACK_SELF_MODIFYING_CODE, 0);
+			func = NULL;
 		} else {
 			/* Cold blocks compile synchronously before any guest opcode
 			 * executes. */
@@ -818,12 +822,13 @@ static void * get_next_block_func(struct lightrec_state *state, u32 pc)
 			if (err) {
 				pc = lightrec_fallback_block(
 				    state, block, pc, LIGHTREC_FALLBACK_JIT_COMPILE_FAILURE, err);
+				func = NULL;
 			} else {
 				func = block->function;
 			}
 		}
-	} while (state->exit_flags == LIGHTREC_EXIT_NORMAL
-		 && state->current_cycle < state->target_cycle);
+	} while (func && state->exit_flags == LIGHTREC_EXIT_NORMAL &&
+		 state->current_cycle < state->target_cycle);
 
 	state->curr_pc = pc;
 	return func;
@@ -1080,8 +1085,9 @@ static struct block * generate_dispatcher(struct lightrec_state *state)
 {
 	struct block *block;
 	jit_state_t *_jit;
-	jit_node_t *to_end, *to_loop, *to_slow_path, *loop, *loop2,
-		   *addr, *addr2, *addr3, *addr4, *addr5, *addr6;
+	jit_node_t *to_end, *to_loop, *to_slow_path, *to_slow_sentinel, *boundary_to_end,
+	    *boundary_continue, *boundary_exit, *loop, *loop2, *addr, *addr2, *addr3, *addr4,
+	    *addr5, *addr6;
 	unsigned int i;
 
 	block = lightrec_malloc(state, MEM_FOR_IR, sizeof(*block));
@@ -1117,6 +1123,31 @@ static struct block * generate_dispatcher(struct lightrec_state *state)
 
 	loop2 = jit_label();
 
+	/* A consumer hook observes the exact PC before lookup, compilation, fallback,
+	 * or execution. Redirects return here and therefore cannot bypass a second
+	 * boundary check at the replacement target. */
+	boundary_to_end = jit_blei(LIGHTREC_REG_CYCLE, 0);
+	jit_stxi_i(lightrec_offset(curr_pc), LIGHTREC_REG_STATE, JIT_V0);
+
+	if (state->ops.block_boundary) {
+		update_cycle_counter_before_c(_jit);
+
+		jit_prepare();
+		jit_pushargr(LIGHTREC_REG_STATE);
+		jit_pushargr(JIT_V0);
+		jit_finishi(lightrec_run_block_boundary);
+		jit_retval(JIT_V1);
+
+		update_cycle_counter_after_c(_jit);
+
+		boundary_continue = jit_bnei(JIT_V1, 0);
+		jit_ldxi_ui(JIT_V0, LIGHTREC_REG_STATE, lightrec_offset(curr_pc));
+		jit_ldxi_ui(JIT_R1, LIGHTREC_REG_STATE, lightrec_offset(exit_flags));
+		boundary_exit = jit_bnei(JIT_R1, LIGHTREC_EXIT_NORMAL);
+		jit_patch_at(jit_b(), loop2);
+		jit_patch(boundary_continue);
+	}
+
 	/* Convert next PC to KUNSEG and avoid mirrors */
 	jit_andi(JIT_V1, JIT_V0, RAM_SIZE - 1);
 	jit_andi(JIT_R2, JIT_V0, BIOS_SIZE - 1);
@@ -1146,8 +1177,15 @@ static struct block * generate_dispatcher(struct lightrec_state *state)
 
 	/* If we get NULL, jump to the slow path */
 	to_slow_path = jit_beqi(JIT_V1, 0);
+	jit_ldxi(JIT_R1, LIGHTREC_REG_STATE, lightrec_offset(get_next_block));
+	to_slow_sentinel = jit_beqr(JIT_V1, JIT_R1);
+	lightrec_emit_increment_dispatch_counter(
+	    _jit, offsetof(struct lightrec_state, execution_stats) +
+		      offsetof(struct lightrec_execution_stats, cache_hits));
 
-	jit_patch(to_loop);
+	/* Initial entry has no pre-resolved block: route it through the same exact
+	 * boundary and lookup path as every successor. */
+	jit_patch_at(to_loop, loop2);
 	loop = jit_label();
 
 	if (!arch_has_fast_mask())
@@ -1157,6 +1195,7 @@ static struct block * generate_dispatcher(struct lightrec_state *state)
 	jit_jmpr(JIT_V1);
 
 	jit_patch(to_slow_path);
+	jit_patch(to_slow_sentinel);
 
 	/* Cold or invalidated blocks enter the synchronous compiler here. */
 	addr = jit_indirect();
@@ -1190,12 +1229,20 @@ static struct block * generate_dispatcher(struct lightrec_state *state)
 	/* Reset JIT_V0 to the next PC */
 	jit_ldxi_ui(JIT_V0, LIGHTREC_REG_STATE, lightrec_offset(curr_pc));
 
-	/* If we get non-NULL, loop */
+	/* If compilation produced a block, execute it without a duplicate boundary
+	 * notification. A bounded fallback returns NULL with curr_pc advanced; route
+	 * that new PC through the boundary before doing more work. */
 	jit_patch_at(jit_bnei(JIT_V1, 0), loop);
+	jit_ldxi_ui(JIT_V0, LIGHTREC_REG_STATE, lightrec_offset(curr_pc));
+	jit_ldxi_ui(JIT_R1, LIGHTREC_REG_STATE, lightrec_offset(exit_flags));
+	jit_patch_at(jit_beqi(JIT_R1, LIGHTREC_EXIT_NORMAL), loop2);
 
 	/* When exiting, the recompiled code will jump to that address */
 	jit_note(__FILE__, __LINE__);
 	jit_patch(to_end);
+	jit_patch(boundary_to_end);
+	if (state->ops.block_boundary)
+		jit_patch(boundary_exit);
 
 	/* Store back the current PC to the lightrec_state structure */
 	jit_stxi_i(lightrec_offset(curr_pc), LIGHTREC_REG_STATE, JIT_V0);
@@ -1677,53 +1724,10 @@ int lightrec_compile_block(struct lightrec_cstate *cstate,
 	}
 
 	pr_debug("Blocks compiled: %u\n", ++state->nb_compile);
+	state->execution_stats.translated_blocks++;
+	state->execution_stats.translated_instructions += block->nb_ops;
 
 	return 0;
-}
-
-static void lightrec_print_info(struct lightrec_state *state)
-{
-	if ((state->current_cycle & ~0xfffffff) != state->old_cycle_counter) {
-		pr_info("Lightrec RAM usage: IR %u KiB, CODE %u KiB, "
-			"MIPS %u KiB, TOTAL %u KiB, avg. IPI %f\n",
-			lightrec_get_mem_usage(MEM_FOR_IR) / 1024,
-			lightrec_get_mem_usage(MEM_FOR_CODE) / 1024,
-			lightrec_get_mem_usage(MEM_FOR_MIPS_CODE) / 1024,
-			lightrec_get_total_mem_usage() / 1024,
-		       lightrec_get_average_ipi());
-		state->old_cycle_counter = state->current_cycle & ~0xfffffff;
-	}
-}
-
-u32 lightrec_execute(struct lightrec_state *state, u32 pc, u32 target_cycle)
-{
-	s32 (*func)(struct lightrec_state *, u32, void *, s32) = (void *)state->dispatcher->function;
-	void *block_trace;
-	s32 cycles_delta;
-
-	state->exit_flags = LIGHTREC_EXIT_NORMAL;
-
-	/* Handle the cycle counter overflowing */
-	if (unlikely(target_cycle < state->current_cycle))
-		target_cycle = UINT_MAX;
-
-	state->target_cycle = target_cycle;
-	state->curr_pc = pc;
-
-	block_trace = get_next_block_func(state, pc);
-	if (block_trace) {
-		cycles_delta = state->target_cycle - state->current_cycle;
-
-		cycles_delta = (*func)(state, state->curr_pc,
-				       block_trace, cycles_delta);
-
-		state->current_cycle = state->target_cycle - cycles_delta;
-	}
-
-	if (LOG_LEVEL >= INFO_L)
-		lightrec_print_info(state);
-
-	return state->curr_pc;
 }
 
 u32 lightrec_run_interpreter(struct lightrec_state *state, u32 pc,
@@ -1979,95 +1983,4 @@ void lightrec_set_unsafe_opt_flags(struct lightrec_state *state, u32 flags)
 		lightrec_invalidate_all(state);
 
 	state->opt_flags = flags;
-}
-
-void lightrec_set_exit_flags(struct lightrec_state *state, u32 flags)
-{
-	if (flags != LIGHTREC_EXIT_NORMAL) {
-		state->exit_flags |= flags;
-		state->target_cycle = state->current_cycle;
-	}
-}
-
-u32 lightrec_exit_flags(struct lightrec_state *state)
-{
-	return state->exit_flags;
-}
-
-const struct lightrec_execution_stats *
-lightrec_get_execution_stats(const struct lightrec_state *state)
-{
-	return &state->execution_stats;
-}
-
-void lightrec_reset_execution_stats(struct lightrec_state *state)
-{
-	memset(&state->execution_stats, 0, sizeof(state->execution_stats));
-	memset(&state->last_fallback, 0, sizeof(state->last_fallback));
-}
-
-const struct lightrec_fallback_event *lightrec_get_last_fallback(const struct lightrec_state *state)
-{
-	return &state->last_fallback;
-}
-
-const char *lightrec_fallback_reason_name(enum lightrec_fallback_reason reason)
-{
-	static const char *const names[LIGHTREC_FALLBACK_REASON_COUNT] = {
-	    [LIGHTREC_FALLBACK_NONE] = "none",
-	    [LIGHTREC_FALLBACK_SELF_MODIFYING_CODE] = "self_modifying_code",
-	    [LIGHTREC_FALLBACK_UNSUPPORTED_CONTROL_FLOW] = "unsupported_control_flow",
-	    [LIGHTREC_FALLBACK_JIT_COMPILE_FAILURE] = "jit_compile_failure",
-	    [LIGHTREC_FALLBACK_LOAD_DELAY_HAZARD] = "load_delay_hazard",
-	    [LIGHTREC_FALLBACK_UNSAFE_FETCH] = "unsafe_fetch",
-	};
-
-	if ((unsigned int)reason >= LIGHTREC_FALLBACK_REASON_COUNT)
-		return "invalid";
-	return names[reason];
-}
-
-_Bool lightrec_execution_is_dynarec_dominated(const struct lightrec_state *state)
-{
-	return state->execution_stats.jit_instructions >
-	       state->execution_stats.fallback_instructions;
-}
-
-u32 lightrec_current_cycle_count(const struct lightrec_state *state)
-{
-	return state->current_cycle;
-}
-
-void lightrec_reset_cycle_count(struct lightrec_state *state, u32 cycles)
-{
-	state->current_cycle = cycles;
-
-	if (state->target_cycle < cycles)
-		state->target_cycle = cycles;
-}
-
-void lightrec_set_target_cycle_count(struct lightrec_state *state, u32 cycles)
-{
-	if (state->exit_flags == LIGHTREC_EXIT_NORMAL) {
-		if (cycles < state->current_cycle)
-			cycles = state->current_cycle;
-
-		state->target_cycle = cycles;
-	}
-}
-
-struct lightrec_registers * lightrec_get_registers(struct lightrec_state *state)
-{
-	return &state->regs;
-}
-
-void lightrec_set_cycles_per_opcode(struct lightrec_state *state, u32 cycles)
-{
-	if (state->cycles_per_op == cycles)
-		return;
-
-	state->cycles_per_op = cycles;
-
-	lightrec_invalidate_all(state);
-	lightrec_free_all_blocks(state->block_cache);
 }

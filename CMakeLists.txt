@@ -8,6 +8,7 @@ list(APPEND LIGHTREC_SOURCES
 	blockcache.c
 	constprop.c
 	emitter.c
+	execution.c
 	interpreter.c
 	lightrec.c
 	memmanager.c
@@ -20,6 +21,7 @@ list(APPEND LIGHTREC_HEADERS
 	debug.h
 	disassembler.h
 	emitter.h
+	execution.h
 	interpreter.h
 	lightning_compat.h
 	lightrec-private.h

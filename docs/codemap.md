@@ -2,8 +2,8 @@
 
 | Responsibility | Owner | Entry points |
 |---|---|---|
-| Public runtime and metrics ABI | `lightrec.h` | `lightrec_execute`, `lightrec_get_execution_stats`, `lightrec_get_last_fallback` |
-| Dispatch, synchronous compilation, typed fallback | `lightrec.c` | `get_next_block_func`, `lightrec_fallback_block` |
+| Public runtime, block-boundary, and metrics ABI | `lightrec.h`, `execution.c` | `lightrec_execute`, `lightrec_ops.block_boundary`, `lightrec_get_execution_stats`, `lightrec_get_last_fallback` |
+| Dispatch, block-boundary actions, synchronous compilation, typed fallback | `lightrec.c`, `execution.c` | `lightrec_run_block_boundary`, `get_next_block_func`, `lightrec_fallback_block` |
 | Guest decode and IR | `disassembler.h`, `lightrec.c` | `lightrec_disassemble`, `lightrec_precompile_block` |
 | IR optimization | `optimizer.c` | `lightrec_optimize` |
 | Native lowering and execution counters | `emitter.c`, `regcache.c` | `lightrec_rec_opcode` |
