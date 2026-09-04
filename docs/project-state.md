@@ -1,0 +1,18 @@
+# Project state
+
+Comparison baseline: upstream Lightrec at
+`550f700c037e8713e4567227514424621cd39cd7`, whose default configuration
+interprets every cold block while compiling in the background.
+
+| ID | Capability | State | Evidence or gap |
+|---|---|---|---|
+| LR-EXEC-1 | Cold blocks compile synchronously before execution | verified | Clang-built x86_64 runtime test executes a cold two-instruction block as one JIT block with zero fallback. |
+| LR-EXEC-2 | Typed, measured fallback | verified | Runtime falsifiers cover unsupported control flow and unsafe fetch with per-reason block/instruction totals; diagnostic interpretation leaves fallback telemetry untouched. |
+| LR-EXEC-3 | Dynarec-dominated conformance decision | partial | Strict-majority API implemented; consumer integration remains. |
+| LR-HOST-1 | Linux x86_64 native execution | verified | Clang 22.1.8 builds and runs the contract test against system GNU Lightning 2.2.3. |
+| LR-HOST-2 | macOS arm64 native execution | blocked | Requires a maintained MAP_JIT/write-protection arena implementation and signed-app test. |
+| LR-HOST-3 | Android arm64-v8a native execution | blocked | Requires GNU Lightning x18 reservation plus API-21 device/emulator execution test. |
+
+Current focus: integrate the measured execution contract in consumers. The
+maintained GNU Lightning target fixes remain prerequisites before enabling
+either AArch64 target.

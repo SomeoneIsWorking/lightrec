@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.10)
-project(lightrec LANGUAGES C VERSION 0.9)
+project(lightrec LANGUAGES C VERSION 0.10)
+
+include(cmake/LightrecHost.cmake)
+lightrec_require_proven_host()
 
 list(APPEND LIGHTREC_SOURCES
 	blockcache.c
@@ -18,11 +21,11 @@ list(APPEND LIGHTREC_HEADERS
 	disassembler.h
 	emitter.h
 	interpreter.h
+	lightning_compat.h
 	lightrec-private.h
 	lightrec.h
 	memmanager.h
 	optimizer.h
-	recompiler.h
 	regcache.h
 )
 
@@ -62,17 +65,6 @@ endif()
 
 set(HAS_DEFAULT_ELM ${CMAKE_COMPILER_IS_GNUCC})
 
-option(ENABLE_FIRST_PASS "Run the interpreter as first-pass optimization" ON)
-
-option(ENABLE_THREADED_COMPILER "Enable threaded compiler" ON)
-if (ENABLE_THREADED_COMPILER)
-	target_sources(lightrec PRIVATE recompiler.c reaper.c)
-
-	if (NOT ENABLE_FIRST_PASS)
-		message(SEND_ERROR "Threaded compiler requires first-pass optimization")
-	endif (NOT ENABLE_FIRST_PASS)
-endif (ENABLE_THREADED_COMPILER)
-
 option(OPT_REMOVE_DIV_BY_ZERO_SEQ "(optimization) Remove div-by-zero check sequence" ON)
 option(OPT_REPLACE_MEMSET "(optimization) Detect and replace memset with host variant" ON)
 option(OPT_DETECT_IMPOSSIBLE_BRANCHES "(optimization) Detect impossible branches" ON)
@@ -103,16 +95,6 @@ if (CMAKE_C_COMPILER_ID STREQUAL "Clang")
 	target_compile_options(lightrec PRIVATE -Wno-initializer-overrides)
 endif()
 
-if (ENABLE_THREADED_COMPILER)
-	include(FindThreads)
-
-	if (NOT CMAKE_USE_PTHREADS_INIT)
-		message(SEND_ERROR "Could not find compatible threads library")
-	endif()
-
-	target_link_libraries(lightrec PUBLIC Threads::Threads)
-endif (ENABLE_THREADED_COMPILER)
-
 option(ENABLE_CODE_BUFFER "Enable external code buffer" ON)
 if (ENABLE_CODE_BUFFER)
 	target_sources(lightrec PRIVATE tlsf/tlsf.c)
@@ -120,9 +102,11 @@ if (ENABLE_CODE_BUFFER)
 endif (ENABLE_CODE_BUFFER)
 
 find_library(LIBLIGHTNING lightning REQUIRED)
-find_path(LIBLIGHTNING_INCLUDE_DIR lightning.h REQUIRED)
+find_path(LIBLIGHTNING_INCLUDE_DIR NAMES lightning.h lightning/lightning.h REQUIRED)
 
-target_include_directories(lightrec PUBLIC ${LIBLIGHTNING_INCLUDE_DIR})
+target_include_directories(lightrec PUBLIC
+	$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+	${LIBLIGHTNING_INCLUDE_DIR})
 target_link_libraries(lightrec PUBLIC ${LIBLIGHTNING})
 
 if (LOG_LEVEL STREQUAL Debug)
@@ -139,3 +123,43 @@ install(TARGETS lightrec
 	RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 	PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
+
+include(CTest)
+if (BUILD_TESTING)
+	add_executable(lightrec_runtime_contract_test tests/runtime_contract_test.c)
+	target_link_libraries(lightrec_runtime_contract_test PRIVATE lightrec)
+	add_test(NAME lightrec_runtime_contract COMMAND lightrec_runtime_contract_test)
+
+	find_package(Python3 REQUIRED COMPONENTS Interpreter)
+	add_test(NAME lightrec_source_contract
+		COMMAND ${Python3_EXECUTABLE}
+			${CMAKE_CURRENT_SOURCE_DIR}/tools/check_runtime_contract.py
+			--root ${CMAKE_CURRENT_SOURCE_DIR})
+	add_test(NAME lightrec_host_policy
+		COMMAND ${Python3_EXECUTABLE}
+			${CMAKE_CURRENT_SOURCE_DIR}/tools/check_host_policy.py
+			--root ${CMAKE_CURRENT_SOURCE_DIR}
+			--cmake ${CMAKE_COMMAND})
+
+	option(LIGHTREC_MAINTAINER_CHECKS
+		"Run source formatting, Clang analyzer, and structure checks" OFF)
+	if (LIGHTREC_MAINTAINER_CHECKS)
+		find_program(CLANG_FORMAT_EXECUTABLE clang-format)
+		find_program(CLANG_FORMAT_DIFF_EXECUTABLE clang-format-diff)
+		find_program(CLANG_TIDY_EXECUTABLE clang-tidy)
+		if (NOT CLANG_FORMAT_EXECUTABLE OR
+		    NOT CLANG_FORMAT_DIFF_EXECUTABLE OR
+		    NOT CLANG_TIDY_EXECUTABLE)
+			message(FATAL_ERROR
+				"LIGHTREC_MAINTAINER_CHECKS requires clang-format, clang-format-diff, and clang-tidy")
+		endif()
+		add_test(NAME lightrec_source_quality
+			COMMAND ${Python3_EXECUTABLE}
+				${CMAKE_CURRENT_SOURCE_DIR}/tools/check_source_quality.py
+				--root ${CMAKE_CURRENT_SOURCE_DIR}
+				--build ${CMAKE_CURRENT_BINARY_DIR}
+				--clang-format ${CLANG_FORMAT_EXECUTABLE}
+				--clang-format-diff ${CLANG_FORMAT_DIFF_EXECUTABLE}
+				--clang-tidy ${CLANG_TIDY_EXECUTABLE})
+	endif()
+endif()

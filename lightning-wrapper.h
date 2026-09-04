@@ -6,7 +6,7 @@
 #ifndef __LIGHTNING_WRAPPER_H__
 #define __LIGHTNING_WRAPPER_H__
 
-#include <lightning.h>
+#include "lightning_compat.h"
 
 #include "lightrec-config.h"
 

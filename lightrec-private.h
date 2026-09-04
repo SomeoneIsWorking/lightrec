@@ -12,10 +12,6 @@
 #include "lightrec.h"
 #include "regcache.h"
 
-#if ENABLE_THREADED_COMPILER
-#include <stdatomic.h>
-#endif
-
 #ifdef _MSC_BUILD
 #include <immintrin.h>
 #endif
@@ -100,10 +96,8 @@ struct jit_state;
 typedef struct jit_state jit_state_t;
 
 struct blockcache;
-struct recompiler;
 struct regcache;
 struct opcode;
-struct reaper;
 
 struct u16x2 {
 #if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
@@ -124,11 +118,7 @@ struct block {
 	u32 precompile_date;
 	unsigned int code_size;
 	u16 nb_ops;
-#if ENABLE_THREADED_COMPILER
-	_Atomic u8 flags;
-#else
 	u8 flags;
-#endif
 };
 
 struct lightrec_branch {
@@ -180,9 +170,7 @@ struct lightrec_state {
 	struct block *dispatcher, *c_wrapper_block;
 	void *c_wrappers[C_WRAPPERS_COUNT];
 	struct blockcache *block_cache;
-	struct recompiler *rec;
 	struct lightrec_cstate *cstate;
-	struct reaper *reaper;
 	void *tlsf;
 	void (*eob_wrapper_func)(void);
 	void (*interpreter_func)(void);
@@ -197,6 +185,9 @@ struct lightrec_state {
 	const struct lightrec_mem_map *maps;
 	uintptr_t offset_ram, offset_bios, offset_scratch, offset_io;
 	u32 opt_flags;
+	struct lightrec_execution_stats execution_stats;
+	struct lightrec_fallback_event last_fallback;
+	enum lightrec_fallback_reason active_fallback_reason;
 	_Bool with_32bit_lut;
 	_Bool mirrors_mapped;
 	void *code_lut[];
@@ -310,6 +301,8 @@ void lightrec_free_opcode_list(struct lightrec_state *state,
 unsigned int lightrec_cycles_of_opcode(const struct lightrec_state *state,
 				       union code code);
 
+void lightrec_record_fallback_instruction(struct lightrec_state *state);
+
 static inline u8 get_mult_div_lo(union code c)
 {
 	return (OPT_FLAG_MULT_DIV && c.r.rd) ? c.r.rd : REG_LO;
@@ -327,39 +320,25 @@ static inline s16 s16_max(s16 a, s16 b)
 
 static inline _Bool block_has_flag(struct block *block, u8 flag)
 {
-#if ENABLE_THREADED_COMPILER
-	return atomic_load_explicit(&block->flags, memory_order_relaxed) & flag;
-#else
 	return block->flags & flag;
-#endif
 }
 
 static inline u8 block_set_flags(struct block *block, u8 mask)
 {
-#if ENABLE_THREADED_COMPILER
-	return atomic_fetch_or_explicit(&block->flags, mask,
-					memory_order_relaxed);
-#else
 	u8 flags = block->flags;
 
 	block->flags |= mask;
 
 	return flags;
-#endif
 }
 
 static inline u8 block_clear_flags(struct block *block, u8 mask)
 {
-#if ENABLE_THREADED_COMPILER
-	return atomic_fetch_and_explicit(&block->flags, ~mask,
-					 memory_order_relaxed);
-#else
 	u8 flags = block->flags;
 
 	block->flags &= ~mask;
 
 	return flags;
-#endif
 }
 
 static inline _Bool can_sign_extend(s32 value, u8 order)

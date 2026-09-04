@@ -56,6 +56,31 @@ typedef int8_t  s8;
 struct lightrec_state;
 struct lightrec_mem_map;
 
+enum lightrec_fallback_reason {
+	LIGHTREC_FALLBACK_NONE = 0,
+	LIGHTREC_FALLBACK_SELF_MODIFYING_CODE,
+	LIGHTREC_FALLBACK_UNSUPPORTED_CONTROL_FLOW,
+	LIGHTREC_FALLBACK_JIT_COMPILE_FAILURE,
+	LIGHTREC_FALLBACK_LOAD_DELAY_HAZARD,
+	LIGHTREC_FALLBACK_UNSAFE_FETCH,
+	LIGHTREC_FALLBACK_REASON_COUNT,
+};
+
+struct lightrec_fallback_event {
+	enum lightrec_fallback_reason reason;
+	u32 guest_pc;
+	int host_error;
+};
+
+struct lightrec_execution_stats {
+	u64 jit_blocks;
+	u64 jit_instructions;
+	u64 fallback_blocks;
+	u64 fallback_instructions;
+	u64 fallback_blocks_by_reason[LIGHTREC_FALLBACK_REASON_COUNT];
+	u64 fallback_instructions_by_reason[LIGHTREC_FALLBACK_REASON_COUNT];
+};
+
 /* Exit flags */
 #define LIGHTREC_EXIT_NORMAL	(0)
 #define LIGHTREC_EXIT_CHECK_INTERRUPT	(1 << 0)
@@ -140,8 +165,18 @@ __api void lightrec_destroy(struct lightrec_state *state);
 
 __api u32 lightrec_execute(struct lightrec_state *state,
 			   u32 pc, u32 target_cycle);
+
+/* Diagnostic-only execution mode. Product gameplay uses lightrec_execute(). */
 __api u32 lightrec_run_interpreter(struct lightrec_state *state,
 				   u32 pc, u32 target_cycle);
+
+__api const struct lightrec_execution_stats *
+lightrec_get_execution_stats(const struct lightrec_state *state);
+__api void lightrec_reset_execution_stats(struct lightrec_state *state);
+__api const struct lightrec_fallback_event *
+lightrec_get_last_fallback(const struct lightrec_state *state);
+__api const char *lightrec_fallback_reason_name(enum lightrec_fallback_reason reason);
+__api _Bool lightrec_execution_is_dynarec_dominated(const struct lightrec_state *state);
 
 __api void lightrec_invalidate(struct lightrec_state *state, u32 addr, u32 len);
 __api void lightrec_invalidate_all(struct lightrec_state *state);

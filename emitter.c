@@ -19,6 +19,22 @@
 
 typedef void (*lightrec_rec_func_t)(struct lightrec_cstate *, const struct block *, u16);
 
+#define EXECUTION_STATS_OFFSET(member)                                                             \
+	(offsetof(struct lightrec_state, execution_stats) +                                        \
+	 offsetof(struct lightrec_execution_stats, member))
+
+static void lightrec_emit_increment_counter(struct lightrec_cstate *state, jit_state_t *_jit,
+					    size_t counter_offset)
+{
+	struct regcache *reg_cache = state->reg_cache;
+	u8 temporary = lightrec_alloc_reg_temp(reg_cache, _jit);
+
+	jit_ldxi_l(temporary, LIGHTREC_REG_STATE, counter_offset);
+	jit_addi(temporary, temporary, 1);
+	jit_stxi_l(counter_offset, LIGHTREC_REG_STATE, temporary);
+	lightrec_free_reg(reg_cache, temporary);
+}
+
 /* Forward declarations */
 static void rec_SPECIAL(struct lightrec_cstate *state, const struct block *block, u16 offset);
 static void rec_REGIMM(struct lightrec_cstate *state, const struct block *block, u16 offset);
@@ -3048,6 +3064,10 @@ void lightrec_rec_opcode(struct lightrec_cstate *state,
 		target->offset = offset;
 		target->label = jit_indirect();
 	}
+
+	if (!offset || op_flag_sync(op->flags))
+		lightrec_emit_increment_counter(state, _jit, EXECUTION_STATS_OFFSET(jit_blocks));
+	lightrec_emit_increment_counter(state, _jit, EXECUTION_STATS_OFFSET(jit_instructions));
 
 	if (likely(op->opcode)) {
 		f = rec_standard[op->i.op];

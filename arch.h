@@ -6,7 +6,7 @@
 #ifndef __LIGHTREC_ARCH_H__
 #define __LIGHTREC_ARCH_H__
 
-#include <lightning.h>
+#include "lightning_compat.h"
 #include <stdbool.h>
 
 static bool arch_has_fast_mask(void)
