@@ -1,5 +1,6 @@
 *.o
 *.so*
 __pycache__/
+.venv/
 build/
 scratch/
