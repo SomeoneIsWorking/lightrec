@@ -27,6 +27,7 @@ are deliberately refused until the GNU Lightning and executable-memory
 requirements in [the runtime contract](docs/runtime-contract.md) are satisfied.
 Upstream provenance is recorded in [docs/upstream.md](docs/upstream.md).
 
-The asset-free hosted gate runs the real synthetic dynarec, invalidation, host-policy, formatting,
-structure, and analyzer contracts on the proven Linux x86-64 host through `python tools/verify.py`.
+The asset-free hosted gate builds the exact maintained GNU Lightning dependency, then runs the real
+synthetic dynarec, invalidation, host-policy, formatting, structure, and analyzer contracts on the
+proven Linux x86-64 host through `uv run --frozen python tools/verify.py`.
 The blocked AArch64 targets are recorded as missing rather than represented by successful no-op jobs.
