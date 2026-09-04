@@ -2,6 +2,7 @@
 
 #include "lightrec.h"
 
+#include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,6 +31,19 @@ struct boundary_test_context {
 	u32 redirect_pc;
 	u32 observed_pcs[8];
 	u32 observed_cycles[8];
+	unsigned int call_count;
+};
+
+enum fallback_test_mode {
+	FALLBACK_TEST_ALLOW,
+	FALLBACK_TEST_REFUSE,
+};
+
+struct fallback_test_context {
+	enum fallback_test_mode mode;
+	struct lightrec_fallback_event observed_event;
+	u64 observed_jit_blocks;
+	u64 observed_jit_instructions;
 	unsigned int call_count;
 };
 
@@ -76,14 +90,32 @@ block_boundary(struct lightrec_state *state, u32 guest_pc, u32 *redirect_pc, voi
 	return LIGHTREC_BLOCK_CONTINUE;
 }
 
-static int fixture_init_with_boundary(struct fixture *fixture,
-				      struct boundary_test_context *boundary_context)
+static enum lightrec_fallback_action fallback_admission(struct lightrec_state *state,
+							const struct lightrec_fallback_event *event,
+							void *user_data)
+{
+	struct fallback_test_context *context = user_data;
+	const struct lightrec_execution_stats *stats = lightrec_get_execution_stats(state);
+
+	context->observed_event = *event;
+	context->observed_jit_blocks = stats->executed_blocks;
+	context->observed_jit_instructions = stats->executed_instructions;
+	context->call_count++;
+	return context->mode == FALLBACK_TEST_ALLOW ? LIGHTREC_FALLBACK_ALLOW
+						    : LIGHTREC_FALLBACK_REFUSE;
+}
+
+static int fixture_init_with_callbacks(struct fixture *fixture,
+				       struct boundary_test_context *boundary_context,
+				       struct fallback_test_context *fallback_context)
 {
 	const struct lightrec_ops ops = {
 	    .cop2_op = cop2_op,
 	    .enable_ram = enable_ram,
 	    .block_boundary = boundary_context ? block_boundary : NULL,
 	    .block_boundary_data = boundary_context,
+	    .fallback_admission = fallback_context ? fallback_admission : NULL,
+	    .fallback_admission_data = fallback_context,
 	};
 
 	*fixture = (struct fixture){0};
@@ -120,9 +152,15 @@ static int fixture_init_with_boundary(struct fixture *fixture,
 	return 0;
 }
 
+static int fixture_init_with_boundary(struct fixture *fixture,
+				      struct boundary_test_context *boundary_context)
+{
+	return fixture_init_with_callbacks(fixture, boundary_context, NULL);
+}
+
 static int fixture_init(struct fixture *fixture)
 {
-	return fixture_init_with_boundary(fixture, NULL);
+	return fixture_init_with_callbacks(fixture, NULL, NULL);
 }
 
 static _Bool fallback_totals_match(const struct lightrec_execution_stats *stats)
@@ -137,6 +175,17 @@ static _Bool fallback_totals_match(const struct lightrec_execution_stats *stats)
 	}
 
 	return blocks == stats->fallback_blocks && instructions == stats->fallback_instructions;
+}
+
+static _Bool refused_fallback_totals_match(const struct lightrec_execution_stats *stats)
+{
+	u64 blocks = 0;
+	unsigned int reason;
+
+	for (reason = 1; reason < LIGHTREC_FALLBACK_REASON_COUNT; reason++)
+		blocks += stats->refused_fallback_blocks_by_reason[reason];
+
+	return blocks == stats->refused_fallback_blocks;
 }
 
 static void print_stats(const char *label, const struct lightrec_execution_stats *stats)
@@ -204,6 +253,77 @@ static int test_unsupported_block_has_typed_fallback(void)
 	return 0;
 }
 
+static int test_fallback_refusal_executes_no_interpreter_instructions(void)
+{
+	struct fallback_test_context fallback = {.mode = FALLBACK_TEST_REFUSE};
+	const struct lightrec_execution_stats *stats;
+	const struct lightrec_fallback_event *event;
+	struct fixture fixture;
+	u32 next_pc;
+
+	if (fixture_init_with_callbacks(&fixture, NULL, &fallback))
+		return 1;
+	fixture.ram[0] = 0x10000001; /* beq with a branch in its delay slot */
+	fixture.ram[1] = 0x08000003;
+	fixture.ram[2] = 0x2402002a; /* must remain unexecuted by the interpreter */
+	fixture.ram[3] = 0x0000000c;
+
+	next_pc = lightrec_execute(fixture.state, 0, 20);
+	stats = lightrec_get_execution_stats(fixture.state);
+	event = lightrec_get_last_fallback(fixture.state);
+	if (next_pc != 0 || fallback.call_count != 1 ||
+	    fallback.observed_event.reason != LIGHTREC_FALLBACK_UNSUPPORTED_CONTROL_FLOW ||
+	    fallback.observed_event.guest_pc != 0 || fallback.observed_event.host_error != 0 ||
+	    event->reason != LIGHTREC_FALLBACK_UNSUPPORTED_CONTROL_FLOW || event->guest_pc != 0 ||
+	    !(lightrec_exit_flags(fixture.state) & LIGHTREC_EXIT_FALLBACK_REFUSED) ||
+	    stats->fallback_blocks != 0 || stats->fallback_instructions != 0 ||
+	    stats->refused_fallback_blocks != 1 ||
+	    stats->refused_fallback_blocks_by_reason[LIGHTREC_FALLBACK_UNSUPPORTED_CONTROL_FLOW] !=
+		1 ||
+	    !fallback_totals_match(stats) || !refused_fallback_totals_match(stats) ||
+	    lightrec_get_registers(fixture.state)->gpr[2] != 0) {
+		fputs("fallback refusal executed or lost its typed event\n", stderr);
+		fixture_destroy(&fixture);
+		return 1;
+	}
+
+	fixture_destroy(&fixture);
+	return 0;
+}
+
+static int test_allowed_fallback_resumes_dynarec(void)
+{
+	struct fallback_test_context fallback = {.mode = FALLBACK_TEST_ALLOW};
+	const struct lightrec_execution_stats *stats;
+	struct fixture fixture;
+
+	if (fixture_init_with_callbacks(&fixture, NULL, &fallback))
+		return 1;
+	fixture.ram[0] = 0x10000001; /* beq with a branch in its delay slot */
+	fixture.ram[1] = 0x08000003;
+	fixture.ram[2] = 0x00000000;
+	fixture.ram[3] = 0x2402002a; /* dynarec resumes here */
+	fixture.ram[4] = 0x0000000c;
+
+	lightrec_execute(fixture.state, 0, 40);
+	stats = lightrec_get_execution_stats(fixture.state);
+	if (fallback.call_count != 1 ||
+	    fallback.observed_event.reason != LIGHTREC_FALLBACK_UNSUPPORTED_CONTROL_FLOW ||
+	    stats->fallback_blocks != 1 || stats->fallback_instructions == 0 ||
+	    stats->refused_fallback_blocks != 0 ||
+	    stats->executed_blocks <= fallback.observed_jit_blocks ||
+	    stats->executed_instructions <= fallback.observed_jit_instructions ||
+	    lightrec_get_registers(fixture.state)->gpr[2] != 42 || !fallback_totals_match(stats) ||
+	    !refused_fallback_totals_match(stats)) {
+		fputs("admitted fallback did not resume dynarec execution\n", stderr);
+		fixture_destroy(&fixture);
+		return 1;
+	}
+
+	fixture_destroy(&fixture);
+	return 0;
+}
+
 static int test_unsafe_fetch_is_not_silent(void)
 {
 	struct fixture fixture;
@@ -226,6 +346,44 @@ static int test_unsafe_fetch_is_not_silent(void)
 		return 1;
 	}
 	print_stats("unsafe-fetch", stats);
+
+	fixture_destroy(&fixture);
+	return 0;
+}
+
+static int test_unsafe_fetch_refusal_precedes_native_fault(void)
+{
+	struct fallback_test_context fallback = {.mode = FALLBACK_TEST_REFUSE};
+	const struct lightrec_execution_stats *stats;
+	const struct lightrec_fallback_event *event;
+	const u32 invalid_pc = 0x1a000000;
+	struct fixture fixture;
+
+	if (fixture_init_with_callbacks(&fixture, NULL, &fallback))
+		return 1;
+	if (lightrec_execute(fixture.state, invalid_pc, 20) != invalid_pc) {
+		fputs("unsafe-fetch refusal lost the exact guest PC\n", stderr);
+		fixture_destroy(&fixture);
+		return 1;
+	}
+
+	stats = lightrec_get_execution_stats(fixture.state);
+	event = lightrec_get_last_fallback(fixture.state);
+	if (fallback.call_count != 1 ||
+	    fallback.observed_event.reason != LIGHTREC_FALLBACK_UNSAFE_FETCH ||
+	    fallback.observed_event.guest_pc != invalid_pc ||
+	    fallback.observed_event.host_error != -EFAULT ||
+	    event->reason != LIGHTREC_FALLBACK_UNSAFE_FETCH || event->guest_pc != invalid_pc ||
+	    event->host_error != -EFAULT ||
+	    lightrec_exit_flags(fixture.state) != LIGHTREC_EXIT_FALLBACK_REFUSED ||
+	    stats->fallback_blocks != 0 || stats->fallback_instructions != 0 ||
+	    stats->refused_fallback_blocks != 1 ||
+	    stats->refused_fallback_blocks_by_reason[LIGHTREC_FALLBACK_UNSAFE_FETCH] != 1 ||
+	    !fallback_totals_match(stats) || !refused_fallback_totals_match(stats)) {
+		fputs("unsafe-fetch fallback bypassed admission\n", stderr);
+		fixture_destroy(&fixture);
+		return 1;
+	}
 
 	fixture_destroy(&fixture);
 	return 0;
@@ -373,7 +531,13 @@ int main(void)
 		return 1;
 	if (test_unsupported_block_has_typed_fallback())
 		return 1;
+	if (test_fallback_refusal_executes_no_interpreter_instructions())
+		return 1;
+	if (test_allowed_fallback_resumes_dynarec())
+		return 1;
 	if (test_unsafe_fetch_is_not_silent())
+		return 1;
+	if (test_unsafe_fetch_refusal_precedes_native_fault())
 		return 1;
 	if (test_diagnostic_interpreter_is_explicit_and_unmixed())
 		return 1;

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(lightrec LANGUAGES C VERSION 0.10)
+project(lightrec LANGUAGES C VERSION 0.11)
 
 include(cmake/LightrecHost.cmake)
 lightrec_require_proven_host()

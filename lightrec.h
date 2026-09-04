@@ -81,6 +81,14 @@ struct lightrec_fallback_event {
 	int host_error;
 };
 
+enum lightrec_fallback_action {
+	LIGHTREC_FALLBACK_ALLOW = 0,
+	LIGHTREC_FALLBACK_REFUSE,
+};
+
+typedef enum lightrec_fallback_action (*lightrec_fallback_admission_cb)(
+    struct lightrec_state *state, const struct lightrec_fallback_event *event, void *user_data);
+
 struct lightrec_execution_stats {
 	union {
 		u64 executed_blocks;
@@ -94,6 +102,8 @@ struct lightrec_execution_stats {
 	u64 fallback_instructions;
 	u64 fallback_blocks_by_reason[LIGHTREC_FALLBACK_REASON_COUNT];
 	u64 fallback_instructions_by_reason[LIGHTREC_FALLBACK_REASON_COUNT];
+	u64 refused_fallback_blocks;
+	u64 refused_fallback_blocks_by_reason[LIGHTREC_FALLBACK_REASON_COUNT];
 	u64 translated_blocks;
 	u64 translated_instructions;
 	u64 cache_hits;
@@ -109,6 +119,7 @@ struct lightrec_execution_stats {
 #define LIGHTREC_EXIT_NOMEM	(1 << 4)
 #define LIGHTREC_EXIT_UNKNOWN_OP	(1 << 5)
 #define LIGHTREC_EXIT_BLOCK_BOUNDARY (1 << 6)
+#define LIGHTREC_EXIT_FALLBACK_REFUSED (1 << 7)
 
 /* Unsafe optimizations flags */
 #define LIGHTREC_OPT_INV_DMA_ONLY	(1 << 0)
@@ -169,6 +180,8 @@ struct lightrec_ops {
 	void (*code_inv)(void *addr, u32 len);
 	lightrec_block_boundary_cb block_boundary;
 	void *block_boundary_data;
+	lightrec_fallback_admission_cb fallback_admission;
+	void *fallback_admission_data;
 };
 
 struct lightrec_registers {

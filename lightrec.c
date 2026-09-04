@@ -32,15 +32,31 @@ static bool lightrec_block_is_fully_tagged(const struct block *block);
 static void lightrec_mtc2(struct lightrec_state *state, u8 reg, u32 data);
 static u32 lightrec_mfc2(struct lightrec_state *state, u8 reg);
 
-static void lightrec_begin_fallback(struct lightrec_state *state,
+static bool lightrec_begin_fallback(struct lightrec_state *state,
 				    enum lightrec_fallback_reason reason, u32 pc, int host_error)
 {
+	enum lightrec_fallback_action action;
+
 	state->last_fallback.reason = reason;
 	state->last_fallback.guest_pc = pc;
 	state->last_fallback.host_error = host_error;
+	if (state->ops.fallback_admission) {
+		action = state->ops.fallback_admission(state, &state->last_fallback,
+						       state->ops.fallback_admission_data);
+		if (action != LIGHTREC_FALLBACK_ALLOW) {
+			state->curr_pc = pc;
+			state->next_pc = pc;
+			state->execution_stats.refused_fallback_blocks++;
+			state->execution_stats.refused_fallback_blocks_by_reason[reason]++;
+			lightrec_set_exit_flags(state, LIGHTREC_EXIT_FALLBACK_REFUSED);
+			return false;
+		}
+	}
+
 	state->active_fallback_reason = reason;
 	state->execution_stats.fallback_blocks++;
 	state->execution_stats.fallback_blocks_by_reason[reason]++;
+	return true;
 }
 
 static u32 lightrec_fallback_block(struct lightrec_state *state, struct block *block, u32 pc,
@@ -48,7 +64,8 @@ static u32 lightrec_fallback_block(struct lightrec_state *state, struct block *b
 {
 	u32 next_pc;
 
-	lightrec_begin_fallback(state, reason, pc, host_error);
+	if (!lightrec_begin_fallback(state, reason, pc, host_error))
+		return pc;
 	next_pc = lightrec_emulate_block(state, block, pc);
 	state->active_fallback_reason = LIGHTREC_FALLBACK_NONE;
 
@@ -743,19 +760,22 @@ static struct block * lightrec_get_block(struct lightrec_state *state, u32 pc)
 
 	if (!block) {
 		if (!lightrec_get_map(state, NULL, kunseg(pc))) {
-			lightrec_begin_fallback(state, LIGHTREC_FALLBACK_UNSAFE_FETCH, pc, -EFAULT);
-			state->active_fallback_reason = LIGHTREC_FALLBACK_NONE;
-			lightrec_set_exit_flags(state, LIGHTREC_EXIT_SEGFAULT);
+			if (lightrec_begin_fallback(state, LIGHTREC_FALLBACK_UNSAFE_FETCH, pc,
+						    -EFAULT)) {
+				state->active_fallback_reason = LIGHTREC_FALLBACK_NONE;
+				lightrec_set_exit_flags(state, LIGHTREC_EXIT_SEGFAULT);
+			}
 			return NULL;
 		}
 
 		block = lightrec_precompile_block(state, pc);
 		if (!block) {
 			pr_err("Unable to recompile block at "PC_FMT"\n", pc);
-			lightrec_begin_fallback(state, LIGHTREC_FALLBACK_JIT_COMPILE_FAILURE, pc,
-						-ENOMEM);
-			state->active_fallback_reason = LIGHTREC_FALLBACK_NONE;
-			lightrec_set_exit_flags(state, LIGHTREC_EXIT_NOMEM);
+			if (lightrec_begin_fallback(state, LIGHTREC_FALLBACK_JIT_COMPILE_FAILURE,
+						    pc, -ENOMEM)) {
+				state->active_fallback_reason = LIGHTREC_FALLBACK_NONE;
+				lightrec_set_exit_flags(state, LIGHTREC_EXIT_NOMEM);
+			}
 			return NULL;
 		}
 
@@ -1048,9 +1068,11 @@ static u32 lightrec_check_load_delay(struct lightrec_state *state, u32 pc, u8 re
 			lightrec_set_exit_flags(state, LIGHTREC_EXIT_SEGFAULT);
 			pc = 0;
 		} else {
-			lightrec_begin_fallback(state, LIGHTREC_FALLBACK_LOAD_DELAY_HAZARD, pc, 0);
-			pc = lightrec_handle_load_delay(state, block, pc, reg);
-			state->active_fallback_reason = LIGHTREC_FALLBACK_NONE;
+			if (lightrec_begin_fallback(state, LIGHTREC_FALLBACK_LOAD_DELAY_HAZARD, pc,
+						    0)) {
+				pc = lightrec_handle_load_delay(state, block, pc, reg);
+				state->active_fallback_reason = LIGHTREC_FALLBACK_NONE;
+			}
 		}
 	}
 
