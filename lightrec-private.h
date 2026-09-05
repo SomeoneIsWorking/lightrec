@@ -153,6 +153,7 @@ struct lightrec_cstate {
 	struct regcache *reg_cache;
 
 	_Bool no_load_delay;
+	_Bool in_delay_slot;
 };
 
 struct lightrec_state {
@@ -273,6 +274,12 @@ static inline u32 get_ds_pc(const struct block *block, u16 offset, s16 imm)
 	offset += op_flag_no_ds(flags);
 
 	return block->pc + ((offset + imm) << 2);
+}
+
+static inline u32 lightrec_exception_flags(union code opcode, _Bool delay_slot)
+{
+	u32 flags = opcode.r.op == OP_SPECIAL_BREAK ? LIGHTREC_EXIT_BREAK : LIGHTREC_EXIT_SYSCALL;
+	return flags | (delay_slot ? LIGHTREC_EXIT_EXCEPTION_DELAY_SLOT : 0);
 }
 
 static inline u32 get_branch_pc(const struct block *block, u16 offset, s16 imm)

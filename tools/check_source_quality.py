@@ -12,10 +12,10 @@ from pathlib import Path
 UPSTREAM_BASE = "550f700c037e8713e4567227514424621cd39cd7"
 DEFAULT_LINE_CAP = 1_200
 LEGACY_LINE_CAPS = {
-    "emitter.c": 3_089,
-    "interpreter.c": 1_303,
+    "emitter.c": 3_085,
+    "interpreter.c": 1_302,
     "lightrec.c": 2_073,
-    "optimizer.c": 2_454,
+    "optimizer.c": 2_397,
 }
 
 

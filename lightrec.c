@@ -1618,6 +1618,7 @@ int lightrec_compile_block(struct lightrec_cstate *cstate,
 	cstate->nb_local_branches = 0;
 	cstate->nb_targets = 0;
 	cstate->no_load_delay = false;
+	cstate->in_delay_slot = false;
 
 	jit_prolog();
 	jit_tramp(256);

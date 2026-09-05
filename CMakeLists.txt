@@ -13,6 +13,7 @@ list(APPEND LIGHTREC_SOURCES
 	lightrec.c
 	memmanager.c
 	optimizer.c
+	optimizer-delay-slots.c
 	regcache.c
 )
 list(APPEND LIGHTREC_HEADERS

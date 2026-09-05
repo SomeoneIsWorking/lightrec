@@ -120,6 +120,9 @@ struct lightrec_execution_stats {
 #define LIGHTREC_EXIT_UNKNOWN_OP	(1 << 5)
 #define LIGHTREC_EXIT_BLOCK_BOUNDARY (1 << 6)
 #define LIGHTREC_EXIT_FALLBACK_REFUSED (1 << 7)
+/* Qualifies SYSCALL/BREAK: the returned PC is the trapping instruction,
+ * executed in a branch delay slot. Consumers own EPC/BD and resumption policy. */
+#define LIGHTREC_EXIT_EXCEPTION_DELAY_SLOT (1 << 8)
 
 /* Unsafe optimizations flags */
 #define LIGHTREC_OPT_INV_DMA_ONLY	(1 << 0)
