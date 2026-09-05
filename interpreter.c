@@ -279,6 +279,9 @@ static u32 int_delay_slot(struct interpreter *inter, u32 pc, bool branch)
 
 	/* Execute delay slot opcode */
 	ds_next_pc = lightrec_int_op(&inter2);
+	inter->cycles += lightrec_cycles_of_opcode(inter->state, op->c);
+	if (state->exit_flags & (LIGHTREC_EXIT_SYSCALL | LIGHTREC_EXIT_BREAK))
+		return ds_next_pc;
 
 	if (branch_at_addr) {
 		if (op_next.i.op == OP_SPECIAL)
@@ -303,8 +306,6 @@ static u32 int_delay_slot(struct interpreter *inter, u32 pc, bool branch)
 		reg_cache[op->r.rs] = new_rs;
 	if (dummy_ld)
 		reg_cache[op->r.rt] = new_rt;
-
-	inter->cycles += lightrec_cycles_of_opcode(inter->state, op->c);
 
 	if (branch_at_addr && branch_taken) {
 		/* If the branch at the target of the branch opcode is taken,
@@ -411,6 +412,8 @@ static u32 int_branch(struct interpreter *inter, u32 pc,
 
 	if (!inter->delay_slot)
 		next_pc = int_delay_slot(inter, next_pc, branch);
+	if (inter->state->exit_flags & (LIGHTREC_EXIT_SYSCALL | LIGHTREC_EXIT_BREAK))
+		return next_pc;
 
 	if (branch)
 		return int_do_branch(inter, pc, next_pc);
@@ -722,12 +725,8 @@ static u32 int_special_SRAV(struct interpreter *inter)
 
 static u32 int_syscall_break(struct interpreter *inter)
 {
-
-	if (inter->op->r.op == OP_SPECIAL_BREAK)
-		lightrec_set_exit_flags(inter->state, LIGHTREC_EXIT_BREAK);
-	else
-		lightrec_set_exit_flags(inter->state, LIGHTREC_EXIT_SYSCALL);
-
+	lightrec_set_exit_flags(inter->state,
+				lightrec_exception_flags(inter->op->c, inter->delay_slot));
 	return int_get_ds_pc(inter, 0);
 }
 

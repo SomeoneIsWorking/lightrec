@@ -87,6 +87,14 @@ static void update_ra_register(struct regcache *reg_cache, jit_state_t *_jit,
 	lightrec_free_reg(reg_cache, link_reg);
 }
 
+static void lightrec_rec_delay_slot(struct lightrec_cstate *state, const struct block *block,
+				    u16 offset)
+{
+	state->in_delay_slot = true;
+	lightrec_rec_opcode(state, block, offset);
+	state->in_delay_slot = false;
+}
+
 static void lightrec_emit_end_of_block(struct lightrec_cstate *state,
 				       const struct block *block, u16 offset,
 				       s8 reg_new_pc, u32 imm, u8 ra_reg,
@@ -120,7 +128,7 @@ static void lightrec_emit_end_of_block(struct lightrec_cstate *state,
 		cycles += lightrec_cycles_of_opcode(state->state, ds->c);
 
 		/* Count optimized architectural NOP delay slots too. */
-		lightrec_rec_opcode(state, block, offset + 1);
+		lightrec_rec_delay_slot(state, block, offset + 1);
 	}
 
 	/* Clean the remaining registers */
@@ -320,7 +328,7 @@ static void rec_b(struct lightrec_cstate *state, const struct block *block, u16 
 		if (!op_flag_no_ds(op->flags) && ds->opcode) {
 			/* Never handle load delays with local branches. */
 			state->no_load_delay = true;
-			lightrec_rec_opcode(state, block, offset + 1);
+			lightrec_rec_delay_slot(state, block, offset + 1);
 		}
 
 		if (link)
@@ -371,7 +379,7 @@ static void rec_b(struct lightrec_cstate *state, const struct block *block, u16 
 
 		if (!op_flag_no_ds(op->flags) && ds->opcode) {
 			state->no_load_delay = true;
-			lightrec_rec_opcode(state, block, offset + 1);
+			lightrec_rec_delay_slot(state, block, offset + 1);
 		}
 	}
 }
@@ -2105,22 +2113,11 @@ static void rec_exit_early(struct lightrec_cstate *state,
 	lightrec_emit_end_of_block(state, block, offset, -1, pc, 31, 0, true);
 }
 
-static void rec_special_SYSCALL(struct lightrec_cstate *state,
-				const struct block *block, u16 offset)
+static void rec_special_exception(struct lightrec_cstate *state, const struct block *block,
+				  u16 offset)
 {
-	_jit_name(block->_jit, __func__);
-
-	/* TODO: the return address should be "pc - 4" if we're a delay slot */
-	rec_exit_early(state, block, offset, LIGHTREC_EXIT_SYSCALL,
-		       get_ds_pc(block, offset, 0));
-}
-
-static void rec_special_BREAK(struct lightrec_cstate *state,
-			      const struct block *block, u16 offset)
-{
-	_jit_name(block->_jit, __func__);
-	rec_exit_early(state, block, offset, LIGHTREC_EXIT_BREAK,
-		       get_ds_pc(block, offset, 0));
+	u32 flags = lightrec_exception_flags(block->opcode_list[offset].c, state->in_delay_slot);
+	rec_exit_early(state, block, offset, flags, get_ds_pc(block, offset, 0));
 }
 
 static void rec_mfc(struct lightrec_cstate *state, const struct block *block, u16 offset)
@@ -2911,35 +2908,35 @@ static const lightrec_rec_func_t rec_standard[64] = {
 };
 
 static const lightrec_rec_func_t rec_special[64] = {
-	SET_DEFAULT_ELM(rec_special, unknown_opcode),
-	[OP_SPECIAL_SLL]	= rec_special_SLL,
-	[OP_SPECIAL_SRL]	= rec_special_SRL,
-	[OP_SPECIAL_SRA]	= rec_special_SRA,
-	[OP_SPECIAL_SLLV]	= rec_special_SLLV,
-	[OP_SPECIAL_SRLV]	= rec_special_SRLV,
-	[OP_SPECIAL_SRAV]	= rec_special_SRAV,
-	[OP_SPECIAL_JR]		= rec_special_JR,
-	[OP_SPECIAL_JALR]	= rec_special_JALR,
-	[OP_SPECIAL_SYSCALL]	= rec_special_SYSCALL,
-	[OP_SPECIAL_BREAK]	= rec_special_BREAK,
-	[OP_SPECIAL_MFHI]	= rec_special_MFHI,
-	[OP_SPECIAL_MTHI]	= rec_special_MTHI,
-	[OP_SPECIAL_MFLO]	= rec_special_MFLO,
-	[OP_SPECIAL_MTLO]	= rec_special_MTLO,
-	[OP_SPECIAL_MULT]	= rec_special_MULT,
-	[OP_SPECIAL_MULTU]	= rec_special_MULTU,
-	[OP_SPECIAL_DIV]	= rec_special_DIV,
-	[OP_SPECIAL_DIVU]	= rec_special_DIVU,
-	[OP_SPECIAL_ADD]	= rec_special_ADD,
-	[OP_SPECIAL_ADDU]	= rec_special_ADDU,
-	[OP_SPECIAL_SUB]	= rec_special_SUB,
-	[OP_SPECIAL_SUBU]	= rec_special_SUBU,
-	[OP_SPECIAL_AND]	= rec_special_AND,
-	[OP_SPECIAL_OR]		= rec_special_OR,
-	[OP_SPECIAL_XOR]	= rec_special_XOR,
-	[OP_SPECIAL_NOR]	= rec_special_NOR,
-	[OP_SPECIAL_SLT]	= rec_special_SLT,
-	[OP_SPECIAL_SLTU]	= rec_special_SLTU,
+    SET_DEFAULT_ELM(rec_special, unknown_opcode),
+    [OP_SPECIAL_SLL] = rec_special_SLL,
+    [OP_SPECIAL_SRL] = rec_special_SRL,
+    [OP_SPECIAL_SRA] = rec_special_SRA,
+    [OP_SPECIAL_SLLV] = rec_special_SLLV,
+    [OP_SPECIAL_SRLV] = rec_special_SRLV,
+    [OP_SPECIAL_SRAV] = rec_special_SRAV,
+    [OP_SPECIAL_JR] = rec_special_JR,
+    [OP_SPECIAL_JALR] = rec_special_JALR,
+    [OP_SPECIAL_SYSCALL] = rec_special_exception,
+    [OP_SPECIAL_BREAK] = rec_special_exception,
+    [OP_SPECIAL_MFHI] = rec_special_MFHI,
+    [OP_SPECIAL_MTHI] = rec_special_MTHI,
+    [OP_SPECIAL_MFLO] = rec_special_MFLO,
+    [OP_SPECIAL_MTLO] = rec_special_MTLO,
+    [OP_SPECIAL_MULT] = rec_special_MULT,
+    [OP_SPECIAL_MULTU] = rec_special_MULTU,
+    [OP_SPECIAL_DIV] = rec_special_DIV,
+    [OP_SPECIAL_DIVU] = rec_special_DIVU,
+    [OP_SPECIAL_ADD] = rec_special_ADD,
+    [OP_SPECIAL_ADDU] = rec_special_ADDU,
+    [OP_SPECIAL_SUB] = rec_special_SUB,
+    [OP_SPECIAL_SUBU] = rec_special_SUBU,
+    [OP_SPECIAL_AND] = rec_special_AND,
+    [OP_SPECIAL_OR] = rec_special_OR,
+    [OP_SPECIAL_XOR] = rec_special_XOR,
+    [OP_SPECIAL_NOR] = rec_special_NOR,
+    [OP_SPECIAL_SLT] = rec_special_SLT,
+    [OP_SPECIAL_SLTU] = rec_special_SLTU,
 };
 
 static const lightrec_rec_func_t rec_regimm[64] = {

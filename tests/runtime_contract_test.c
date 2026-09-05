@@ -525,8 +525,65 @@ static int test_boundary_redirect_replaces_direct_target(void)
 	return 0;
 }
 
+static int test_exception_context(void)
+{
+	const u32 exceptions[] = {0x0000000c, 0x0000000d};
+	unsigned int diagnostic, exception, path;
+
+	for (diagnostic = 0; diagnostic < 2; diagnostic++) {
+		for (exception = 0; exception < 2; exception++) {
+			for (path = 0; path < 4; path++) {
+				struct fixture fixture;
+				const struct lightrec_execution_stats *stats;
+				u32 pc,
+				    flags = exception ? LIGHTREC_EXIT_BREAK : LIGHTREC_EXIT_SYSCALL;
+				if (fixture_init(&fixture))
+					return 1;
+				/* Entering the instruction directly must not inherit the
+				 * preceding branch's delay-slot context. */
+				fixture.ram[0] = 0x14200003; /* bne $at, $zero, 0x10 */
+				fixture.ram[1] = exceptions[exception];
+				fixture.ram[2] = 0x24020001; /* forbidden fallthrough */
+				fixture.ram[3] = 0x0000000c;
+				fixture.ram[4] = 0x24020002; /* forbidden branch target */
+				fixture.ram[5] = 0x0000000c;
+				lightrec_get_registers(fixture.state)->gpr[1] = path == 1;
+				if (path == 3)
+					fixture.ram[0] = 0x08000004; /* unconditional j 0x10 */
+				if (path != 0)
+					flags |= LIGHTREC_EXIT_EXCEPTION_DELAY_SLOT;
+				pc =
+				    diagnostic
+					? lightrec_run_interpreter(fixture.state, path ? 0 : 4, 100)
+					: lightrec_execute(fixture.state, path ? 0 : 4, 100);
+				stats = lightrec_get_execution_stats(fixture.state);
+				if (pc != 4 || lightrec_exit_flags(fixture.state) != flags ||
+				    lightrec_current_cycle_count(fixture.state) !=
+					(path ? 4u : 2u) ||
+				    lightrec_get_registers(fixture.state)->gpr[2] != 0 ||
+				    (!diagnostic &&
+				     (!stats->executed_blocks || stats->fallback_blocks))) {
+					fprintf(stderr,
+						"exception context failed: diagnostic=%u "
+						"exception=%u path=%u pc=%x flags=%x expected=%x\n",
+						diagnostic, exception, path, pc,
+						lightrec_exit_flags(fixture.state), flags);
+					fixture_destroy(&fixture);
+					return 1;
+				}
+				fixture_destroy(&fixture);
+			}
+		}
+	}
+	puts("exception context: JIT and diagnostic SYSCALL/BREAK, direct/taken/untaken/jump "
+	     "passed");
+	return 0;
+}
+
 int main(void)
 {
+	if (test_exception_context())
+		return 1;
 	if (test_cold_block_jits_without_fallback())
 		return 1;
 	if (test_unsupported_block_has_typed_fallback())

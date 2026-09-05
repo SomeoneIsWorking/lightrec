@@ -22,6 +22,7 @@ __cnst _Bool is_unconditional_jump(union code c);
 __cnst _Bool is_syscall(union code c);
 
 _Bool should_emulate(const struct opcode *op);
+_Bool lightrec_can_switch_delay_slot(union code op, union code next_op);
 
 int lightrec_optimize(struct lightrec_state *state, struct block *block);
 
