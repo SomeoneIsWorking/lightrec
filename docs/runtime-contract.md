@@ -43,6 +43,26 @@ intra-translation control-flow targets as dispatcher boundaries, so cached and
 directly linked blocks cannot bypass the callback. The diagnostic-only
 `lightrec_run_interpreter()` entry point does not invoke this runtime hook.
 
+`lightrec_set_store_observer()` is a diagnostic-only, per-state selected-PC
+boundary for ordinary translated `SW` instructions. It accepts up to eight
+aligned guest PCs, including an unreachable control, and may be configured only
+between `lightrec_execute()` calls. Arming or disarming retires cached guest
+translations so an unchanged warm block cannot silently omit or retain the
+hook. When a selected store executes, the callback receives exact original
+guest PC, a before/after phase, coherent RAM, flushed architectural registers,
+and guest cycle. Disarming emits no observer code in subsequent translations.
+The callback must only read state; it must not re-enter Lightrec or modify guest
+registers or memory.
+
+The hook refuses an observed block with `LIGHTREC_EXIT_OBSERVER_UNSUPPORTED`
+before executing any of it if the selected source PC is not a plain `SW`, is a
+delay slot, is interpreted/specialized, or its opcode or source PC moved during
+optimization. This refusal is separate from interpreter fallback. An
+unreached target yields zero callbacks; consumers pair that count with
+`executed_instructions` and fallback totals to distinguish a scanned negative
+from a route that never ran. The limited store contract is deliberate: it does
+not claim exact-PC coverage for other opcodes or transformed store sequences.
+
 `translated_blocks` and `translated_instructions` count successful translation
 events, including retranslations. `executed_blocks` and
 `executed_instructions` count emitted guest work that actually ran; the old

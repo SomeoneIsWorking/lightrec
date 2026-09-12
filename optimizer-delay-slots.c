@@ -2,6 +2,7 @@
 /* Copyright (C) 2014-2021 Paul Cercueil <paul@crapouillou.net> */
 /* Delay-slot scheduling preserves register dependencies and exception context. */
 
+#include "debug.h"
 #include "lightrec-private.h"
 #include "optimizer.h"
 
@@ -67,4 +68,51 @@ _Bool lightrec_can_switch_delay_slot(union code op, union code next_op)
 	}
 
 	return true;
+}
+
+int lightrec_switch_delay_slots(struct lightrec_state *state, struct block *block)
+{
+	struct opcode *list, *next = &block->opcode_list[0];
+	unsigned int i;
+	union code op, next_op;
+	u32 flags, source_pc;
+
+	for (i = 0; i < block->nb_ops - 1; i++) {
+		list = next;
+		next = &block->opcode_list[i + 1];
+		next_op = next->c;
+		op = list->c;
+
+		if (!has_delay_slot(op) || op_flag_no_ds(list->flags) ||
+		    op_flag_emulate_branch(list->flags) || op.opcode == 0 || next_op.opcode == 0)
+			continue;
+
+		if (is_delay_slot(block->opcode_list, i))
+			continue;
+
+		if (op_flag_sync(next->flags))
+			continue;
+
+		if (op_flag_load_delay(next->flags) && opcode_has_load_delay(next_op)) {
+			continue;
+		}
+
+		if (!lightrec_can_switch_delay_slot(list->c, next_op))
+			continue;
+
+		pr_debug("Swap branch and delay slot opcodes "
+			 "at offsets 0x%x / 0x%x\n",
+			 i << 2, (i + 1) << 2);
+
+		flags = next->flags | (list->flags & LIGHTREC_SYNC);
+		source_pc = list->source_pc;
+		list->c = next_op;
+		next->c = op;
+		list->source_pc = next->source_pc;
+		next->source_pc = source_pc;
+		next->flags = (list->flags | LIGHTREC_NO_DS) & ~LIGHTREC_SYNC;
+		list->flags = flags | LIGHTREC_NO_DS;
+	}
+
+	return 0;
 }

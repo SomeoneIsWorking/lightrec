@@ -17,6 +17,7 @@
 #endif
 
 #include <inttypes.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 #define X32_FMT "0x%08"PRIx32
@@ -189,6 +190,11 @@ struct lightrec_state {
 	struct lightrec_execution_stats execution_stats;
 	struct lightrec_fallback_event last_fallback;
 	enum lightrec_fallback_reason active_fallback_reason;
+	lightrec_store_observer_cb store_observer;
+	void *store_observer_data;
+	u32 store_observer_targets[LIGHTREC_STORE_OBSERVER_TARGETS];
+	size_t store_observer_target_count;
+	_Bool executing;
 	_Bool with_32bit_lut;
 	_Bool mirrors_mapped;
 	void *code_lut[];
@@ -201,6 +207,23 @@ u32 lightrec_rw(struct lightrec_state *state, union code op, u32 addr,
 		u32 data, u32 *flags, struct block *block, u16 offset);
 
 void lightrec_free_block(struct lightrec_state *state, struct block *block);
+
+static inline _Bool lightrec_store_observer_matches(const struct lightrec_state *state,
+						    u32 guest_pc)
+{
+	size_t i;
+
+	if (!state->store_observer)
+		return false;
+	for (i = 0; i < state->store_observer_target_count; i++) {
+		if (state->store_observer_targets[i] == guest_pc)
+			return true;
+	}
+	return false;
+}
+
+void lightrec_notify_store_observer(struct lightrec_state *state, u32 guest_pc,
+				    enum lightrec_store_observer_phase phase);
 
 void remove_from_code_lut(struct blockcache *cache, struct block *block);
 
@@ -325,7 +348,7 @@ static inline s16 s16_max(s16 a, s16 b)
 	return a > b ? a : b;
 }
 
-static inline _Bool block_has_flag(struct block *block, u8 flag)
+static inline _Bool block_has_flag(const struct block *block, u8 flag)
 {
 	return block->flags & flag;
 }

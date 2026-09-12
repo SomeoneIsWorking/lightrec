@@ -8,6 +8,7 @@
 #include "blockcache.h"
 #include "debug.h"
 #include "memmanager.h"
+#include "regcache.h"
 
 #include <limits.h>
 #include <string.h>
@@ -40,6 +41,32 @@ void lightrec_emit_increment_dispatch_counter(jit_state_t *_jit, size_t counter_
 	jit_stxi_l(counter_offset, LIGHTREC_REG_STATE, JIT_R1);
 }
 
+void lightrec_emit_increment_counter(struct lightrec_cstate *state, jit_state_t *_jit,
+				     size_t counter_offset)
+{
+	struct regcache *reg_cache = state->reg_cache;
+	u8 temporary = lightrec_alloc_reg_temp(reg_cache, _jit);
+
+	jit_ldxi_l(temporary, LIGHTREC_REG_STATE, counter_offset);
+	jit_addi(temporary, temporary, 1);
+	jit_stxi_l(counter_offset, LIGHTREC_REG_STATE, temporary);
+	lightrec_free_reg(reg_cache, temporary);
+}
+
+void lightrec_update_cycle_counter_before_c(jit_state_t *_jit)
+{
+	jit_ldxi_i(JIT_R2, LIGHTREC_REG_STATE, lightrec_offset(target_cycle));
+	jit_subr(JIT_R1, JIT_R2, LIGHTREC_REG_CYCLE);
+	jit_stxi_i(lightrec_offset(current_cycle), LIGHTREC_REG_STATE, JIT_R1);
+}
+
+void lightrec_update_cycle_counter_after_c(jit_state_t *_jit)
+{
+	jit_ldxi_i(JIT_R1, LIGHTREC_REG_STATE, lightrec_offset(current_cycle));
+	jit_ldxi_i(JIT_R2, LIGHTREC_REG_STATE, lightrec_offset(target_cycle));
+	jit_subr(LIGHTREC_REG_CYCLE, JIT_R2, JIT_R1);
+}
+
 void lightrec_print_info(struct lightrec_state *state)
 {
 	if ((state->current_cycle & ~0xfffffff) != state->old_cycle_counter) {
@@ -65,11 +92,13 @@ u32 lightrec_execute(struct lightrec_state *state, u32 pc, u32 target_cycle)
 	state->target_cycle = target_cycle;
 	state->curr_pc = pc;
 
+	state->executing = true;
 	if (state->current_cycle < state->target_cycle) {
 		cycles_delta = state->target_cycle - state->current_cycle;
 		cycles_delta = (*func)(state, state->curr_pc, NULL, cycles_delta);
 		state->current_cycle = state->target_cycle - cycles_delta;
 	}
+	state->executing = false;
 	if (LOG_LEVEL >= INFO_L)
 		lightrec_print_info(state);
 	return state->curr_pc;

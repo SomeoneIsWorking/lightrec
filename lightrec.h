@@ -55,6 +55,20 @@ typedef int8_t  s8;
 
 struct lightrec_state;
 struct lightrec_mem_map;
+struct lightrec_registers;
+
+#define LIGHTREC_STORE_OBSERVER_TARGETS 8
+
+enum lightrec_store_observer_phase {
+	LIGHTREC_STORE_BEFORE = 0,
+	LIGHTREC_STORE_AFTER,
+};
+
+/* Read-only diagnostic boundary around selected translated SW instructions.
+ * The register snapshot includes JIT-dirty GPRs and cycle is guest time. */
+typedef void (*lightrec_store_observer_cb)(const struct lightrec_registers *registers, u32 guest_pc,
+					   enum lightrec_store_observer_phase phase, u32 cycle,
+					   void *user_data);
 
 enum lightrec_block_boundary_action {
 	LIGHTREC_BLOCK_CONTINUE = 0,
@@ -123,6 +137,7 @@ struct lightrec_execution_stats {
 /* Qualifies SYSCALL/BREAK: the returned PC is the trapping instruction,
  * executed in a branch delay slot. Consumers own EPC/BD and resumption policy. */
 #define LIGHTREC_EXIT_EXCEPTION_DELAY_SLOT (1 << 8)
+#define LIGHTREC_EXIT_OBSERVER_UNSUPPORTED (1 << 9)
 
 /* Unsafe optimizations flags */
 #define LIGHTREC_OPT_INV_DMA_ONLY	(1 << 0)
@@ -218,6 +233,12 @@ __api _Bool lightrec_execution_is_dynarec_dominated(const struct lightrec_state 
 
 __api void lightrec_invalidate(struct lightrec_state *state, u32 addr, u32 len);
 __api void lightrec_invalidate_all(struct lightrec_state *state);
+
+/* Configure only between lightrec_execute calls. Rebuilds cached translations;
+ * zero targets and a null callback disarm. Returns -EINVAL/-EBUSY on refusal. */
+__api int lightrec_set_store_observer(struct lightrec_state *state, const u32 *targets,
+				      size_t count, lightrec_store_observer_cb callback,
+				      void *user_data);
 
 __api void lightrec_set_exit_flags(struct lightrec_state *state, u32 flags);
 __api u32 lightrec_exit_flags(struct lightrec_state *state);

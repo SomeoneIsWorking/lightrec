@@ -1243,52 +1243,6 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 }
 
 
-static int lightrec_switch_delay_slots(struct lightrec_state *state, struct block *block)
-{
-	struct opcode *list, *next = &block->opcode_list[0];
-	unsigned int i;
-	union code op, next_op;
-	u32 flags;
-
-	for (i = 0; i < block->nb_ops - 1; i++) {
-		list = next;
-		next = &block->opcode_list[i + 1];
-		next_op = next->c;
-		op = list->c;
-
-		if (!has_delay_slot(op) || op_flag_no_ds(list->flags) ||
-		    op_flag_emulate_branch(list->flags) ||
-		    op.opcode == 0 || next_op.opcode == 0)
-			continue;
-
-		if (is_delay_slot(block->opcode_list, i))
-			continue;
-
-		if (op_flag_sync(next->flags))
-			continue;
-
-		if (op_flag_load_delay(next->flags)
-		    && opcode_has_load_delay(next_op)) {
-			continue;
-		}
-
-		if (!lightrec_can_switch_delay_slot(list->c, next_op))
-			continue;
-
-		pr_debug("Swap branch and delay slot opcodes "
-			 "at offsets 0x%x / 0x%x\n",
-			 i << 2, (i + 1) << 2);
-
-		flags = next->flags | (list->flags & LIGHTREC_SYNC);
-		list->c = next_op;
-		next->c = op;
-		next->flags = (list->flags | LIGHTREC_NO_DS) & ~LIGHTREC_SYNC;
-		list->flags = flags | LIGHTREC_NO_DS;
-	}
-
-	return 0;
-}
-
 static int lightrec_detect_impossible_branches(struct lightrec_state *state,
 					       struct block *block)
 {

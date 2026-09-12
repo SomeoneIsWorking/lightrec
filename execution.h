@@ -8,6 +8,10 @@
 
 bool lightrec_run_block_boundary(struct lightrec_state *state, u32 pc);
 void lightrec_emit_increment_dispatch_counter(jit_state_t *_jit, size_t counter_offset);
+void lightrec_emit_increment_counter(struct lightrec_cstate *state, jit_state_t *_jit,
+				     size_t counter_offset);
+void lightrec_update_cycle_counter_before_c(jit_state_t *_jit);
+void lightrec_update_cycle_counter_after_c(jit_state_t *_jit);
 void lightrec_print_info(struct lightrec_state *state);
 
 #endif /* __LIGHTREC_EXECUTION_H__ */
