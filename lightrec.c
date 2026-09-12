@@ -785,6 +785,32 @@ static struct block * lightrec_get_block(struct lightrec_state *state, u32 pc)
 	return block;
 }
 
+static bool lightrec_observed_block_unsupported(const struct lightrec_state *state,
+						const struct block *block)
+{
+	unsigned int i;
+	union code previous;
+	u32 guest_pc, raw;
+
+	if (!state->store_observer || block_has_flag(block, BLOCK_NO_OPCODE_LIST))
+		return false;
+	for (i = 0; i < block->nb_ops; i++) {
+		guest_pc = block->pc + (i << 2);
+		if (!lightrec_store_observer_matches(state, guest_pc))
+			continue;
+		raw = LE32TOH(block->code[i]);
+		previous.opcode = i ? LE32TOH(block->code[i - 1]) : 0;
+		if (block_has_flag(block, BLOCK_NEVER_COMPILE) ||
+		    block_has_flag(block, BLOCK_IS_MEMSET) || (raw >> 26) != OP_SW ||
+		    block->opcode_list[i].opcode != raw ||
+		    block->opcode_list[i].source_pc != guest_pc ||
+		    (i && has_delay_slot(previous)) || is_delay_slot(block->opcode_list, i) ||
+		    should_emulate(&block->opcode_list[i]))
+			return true;
+	}
+	return false;
+}
+
 static void * get_next_block_func(struct lightrec_state *state, u32 pc)
 {
 	struct block *block;
@@ -803,6 +829,11 @@ static void * get_next_block_func(struct lightrec_state *state, u32 pc)
 
 		if (unlikely(!block))
 			break;
+		if (lightrec_observed_block_unsupported(state, block)) {
+			lightrec_set_exit_flags(state, LIGHTREC_EXIT_OBSERVER_UNSUPPORTED);
+			func = NULL;
+			break;
+		}
 
 		if (OPT_REPLACE_MEMSET &&
 		    block_has_flag(block, BLOCK_IS_MEMSET)) {
@@ -1079,22 +1110,6 @@ static u32 lightrec_check_load_delay(struct lightrec_state *state, u32 pc, u8 re
 	return pc;
 }
 
-static void update_cycle_counter_before_c(jit_state_t *_jit)
-{
-	/* update state->current_cycle */
-	jit_ldxi_i(JIT_R2, LIGHTREC_REG_STATE, lightrec_offset(target_cycle));
-	jit_subr(JIT_R1, JIT_R2, LIGHTREC_REG_CYCLE);
-	jit_stxi_i(lightrec_offset(current_cycle), LIGHTREC_REG_STATE, JIT_R1);
-}
-
-static void update_cycle_counter_after_c(jit_state_t *_jit)
-{
-	/* Recalc the delta */
-	jit_ldxi_i(JIT_R1, LIGHTREC_REG_STATE, lightrec_offset(current_cycle));
-	jit_ldxi_i(JIT_R2, LIGHTREC_REG_STATE, lightrec_offset(target_cycle));
-	jit_subr(LIGHTREC_REG_CYCLE, JIT_R2, JIT_R1);
-}
-
 static void sync_next_pc(jit_state_t *_jit)
 {
 	if (lightrec_store_next_pc()) {
@@ -1152,7 +1167,7 @@ static struct block * generate_dispatcher(struct lightrec_state *state)
 	jit_stxi_i(lightrec_offset(curr_pc), LIGHTREC_REG_STATE, JIT_V0);
 
 	if (state->ops.block_boundary) {
-		update_cycle_counter_before_c(_jit);
+		lightrec_update_cycle_counter_before_c(_jit);
 
 		jit_prepare();
 		jit_pushargr(LIGHTREC_REG_STATE);
@@ -1160,7 +1175,7 @@ static struct block * generate_dispatcher(struct lightrec_state *state)
 		jit_finishi(lightrec_run_block_boundary);
 		jit_retval(JIT_V1);
 
-		update_cycle_counter_after_c(_jit);
+		lightrec_update_cycle_counter_after_c(_jit);
 
 		boundary_continue = jit_bnei(JIT_V1, 0);
 		jit_ldxi_ui(JIT_V0, LIGHTREC_REG_STATE, lightrec_offset(curr_pc));
@@ -1226,7 +1241,7 @@ static struct block * generate_dispatcher(struct lightrec_state *state)
 
 	if (OPT_DETECT_IMPOSSIBLE_BRANCHES) {
 		/* A difficult branch may execute the bounded fallback. */
-		update_cycle_counter_before_c(_jit);
+		lightrec_update_cycle_counter_before_c(_jit);
 	}
 
 	jit_prepare();
@@ -1243,7 +1258,7 @@ static struct block * generate_dispatcher(struct lightrec_state *state)
 
 	if (OPT_DETECT_IMPOSSIBLE_BRANCHES) {
 		/* The fallback may have updated the cycle counters. */
-		update_cycle_counter_after_c(_jit);
+		lightrec_update_cycle_counter_after_c(_jit);
 	} else {
 		jit_movr(LIGHTREC_REG_CYCLE, JIT_V0);
 	}
@@ -1298,7 +1313,7 @@ static struct block * generate_dispatcher(struct lightrec_state *state)
 		addr4 = jit_indirect();
 
 		sync_next_pc(_jit);
-		update_cycle_counter_before_c(_jit);
+		lightrec_update_cycle_counter_before_c(_jit);
 
 		jit_prepare();
 		jit_pushargr(LIGHTREC_REG_STATE);
@@ -1308,7 +1323,7 @@ static struct block * generate_dispatcher(struct lightrec_state *state)
 
 		jit_retval(JIT_V0);
 
-		update_cycle_counter_after_c(_jit);
+		lightrec_update_cycle_counter_after_c(_jit);
 
 		jit_patch_at(jit_b(), loop2);
 
@@ -1325,7 +1340,7 @@ static struct block * generate_dispatcher(struct lightrec_state *state)
 		addr5 = jit_indirect();
 
 		sync_next_pc(_jit);
-		update_cycle_counter_before_c(_jit);
+		lightrec_update_cycle_counter_before_c(_jit);
 
 		jit_prepare();
 		jit_pushargr(LIGHTREC_REG_STATE);
@@ -1335,7 +1350,7 @@ static struct block * generate_dispatcher(struct lightrec_state *state)
 
 		jit_retval(JIT_V0);
 
-		update_cycle_counter_after_c(_jit);
+		lightrec_update_cycle_counter_after_c(_jit);
 
 		jit_patch_at(jit_b(), loop2);
 	}
@@ -1424,8 +1439,8 @@ static unsigned int lightrec_get_mips_block_len(const u32 *src)
 	}
 }
 
-static struct opcode * lightrec_disassemble(struct lightrec_state *state,
-					    const u32 *src, unsigned int *len)
+static struct opcode *lightrec_disassemble(struct lightrec_state *state, const u32 *src,
+					   u32 guest_pc, unsigned int *len)
 {
 	struct opcode_list *list;
 	unsigned int i, length;
@@ -1444,6 +1459,7 @@ static struct opcode * lightrec_disassemble(struct lightrec_state *state,
 	for (i = 0; i < length; i++) {
 		list->ops[i].opcode = LE32TOH(src[i]);
 		list->ops[i].flags = 0;
+		list->ops[i].source_pc = guest_pc + (i << 2);
 	}
 
 	*len = length * sizeof(u32);
@@ -1472,7 +1488,7 @@ static struct block * lightrec_precompile_block(struct lightrec_state *state,
 		return NULL;
 	}
 
-	list = lightrec_disassemble(state, code, &length);
+	list = lightrec_disassemble(state, code, pc, &length);
 	if (!list) {
 		lightrec_free(state, MEM_FOR_IR, sizeof(*block), block);
 		return NULL;
@@ -1998,6 +2014,43 @@ void lightrec_invalidate(struct lightrec_state *state, u32 addr, u32 len)
 void lightrec_invalidate_all(struct lightrec_state *state)
 {
 	memset(state->code_lut, 0, lut_elm_size(state) * CODE_LUT_SIZE);
+}
+
+int lightrec_set_store_observer(struct lightrec_state *state, const u32 *targets, size_t count,
+				lightrec_store_observer_cb callback, void *user_data)
+{
+	size_t i, j;
+
+	if (!state || (count == 0 && (targets || callback || user_data)) ||
+	    (count != 0 && (!targets || !callback || count > LIGHTREC_STORE_OBSERVER_TARGETS)))
+		return -EINVAL;
+	if (state->executing)
+		return -EBUSY;
+	for (i = 0; i < count; i++) {
+		if (targets[i] & 3)
+			return -EINVAL;
+		for (j = 0; j < i; j++) {
+			if (targets[i] == targets[j])
+				return -EINVAL;
+		}
+	}
+
+	/* A LUT-only invalidation would reuse the old unchanged compiled block. */
+	lightrec_invalidate_all(state);
+	lightrec_free_all_blocks(state->block_cache);
+	state->store_observer = callback;
+	state->store_observer_data = user_data;
+	state->store_observer_target_count = count;
+	if (count)
+		memcpy(state->store_observer_targets, targets, count * sizeof(*targets));
+	return 0;
+}
+
+void lightrec_notify_store_observer(struct lightrec_state *state, u32 guest_pc,
+				    enum lightrec_store_observer_phase phase)
+{
+	state->store_observer(&state->regs, guest_pc, phase, state->current_cycle,
+			      state->store_observer_data);
 }
 
 void lightrec_set_unsafe_opt_flags(struct lightrec_state *state, u32 flags)

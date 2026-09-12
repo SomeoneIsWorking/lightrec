@@ -292,6 +292,7 @@ struct opcode {
 		struct opcode_m m;
 	};
 	u32 flags;
+	u32 source_pc;
 };
 
 struct opcode_list {

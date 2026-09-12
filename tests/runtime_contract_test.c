@@ -47,6 +47,34 @@ struct fallback_test_context {
 	unsigned int call_count;
 };
 
+struct store_observer_context {
+	u32 *ram;
+	u32 pcs[4];
+	u32 values[4];
+	u32 source_regs[4];
+	u32 cycles[4];
+	enum lightrec_store_observer_phase phases[4];
+	unsigned int calls;
+	unsigned int sentinel_hits;
+};
+
+static void observe_store(const struct lightrec_registers *registers, u32 guest_pc,
+			  enum lightrec_store_observer_phase phase, u32 cycle, void *user_data)
+{
+	struct store_observer_context *context = user_data;
+	unsigned int index = context->calls++;
+
+	if (guest_pc == 0xfffffffc)
+		context->sentinel_hits++;
+	if (index >= 4)
+		return;
+	context->pcs[index] = guest_pc;
+	context->values[index] = context->ram[0x40 / sizeof(u32)];
+	context->source_regs[index] = registers->gpr[9];
+	context->cycles[index] = cycle;
+	context->phases[index] = phase;
+}
+
 static void fixture_destroy(struct fixture *fixture)
 {
 	if (fixture->state)
@@ -450,6 +478,149 @@ static int test_boundary_callback_observes_cache_hit(void)
 	return 0;
 }
 
+static int test_selected_interior_store_observer(void)
+{
+	const u32 targets[] = {8, 0xfffffffc};
+	const u32 unsupported_target = 4;
+	struct store_observer_context observer = {0};
+	struct fixture fixture;
+	struct lightrec_registers *registers;
+	const struct lightrec_execution_stats *stats;
+	u64 warm_translations;
+	u64 before_unsupported_instructions;
+	u32 plain_cycles, plain_result;
+	u32 unsupported_pc;
+
+	if (fixture_init(&fixture))
+		return 1;
+	fixture.ram[0] = 0x24080040; /* addiu $t0, $zero, 0x40 */
+	fixture.ram[1] = 0x24090007; /* addiu $t1, $zero, 7 */
+	fixture.ram[2] = 0xad090000; /* sw $t1, 0($t0): interior store */
+	fixture.ram[3] = 0x240a0009; /* addiu $t2, $zero, 9 */
+	fixture.ram[4] = 0x0000000c; /* syscall */
+	observer.ram = fixture.ram;
+
+	lightrec_execute(fixture.state, 0, 100);
+	stats = lightrec_get_execution_stats(fixture.state);
+	registers = lightrec_get_registers(fixture.state);
+	warm_translations = stats->translated_blocks;
+	plain_cycles = lightrec_current_cycle_count(fixture.state);
+	plain_result = registers->gpr[10];
+	if (warm_translations == 0 || stats->fallback_blocks != 0 ||
+	    stats->fallback_instructions != 0 || fixture.ram[0x40 / sizeof(u32)] != 7 ||
+	    plain_result != 9) {
+		fputs("unobserved interior-store JIT baseline failed\n", stderr);
+		fixture_destroy(&fixture);
+		return 1;
+	}
+
+	fixture.ram[0x40 / sizeof(u32)] = 0;
+	*registers = (struct lightrec_registers){0};
+	lightrec_reset_cycle_count(fixture.state, 0);
+	if (lightrec_set_store_observer(fixture.state, targets, 2, observe_store, &observer)) {
+		fputs("failed to arm selected-store observer\n", stderr);
+		fixture_destroy(&fixture);
+		return 1;
+	}
+
+	lightrec_execute(fixture.state, 0, 100);
+	stats = lightrec_get_execution_stats(fixture.state);
+	if (observer.calls != 2 || observer.sentinel_hits != 0 || observer.pcs[0] != 8 ||
+	    observer.pcs[1] != 8 || observer.phases[0] != LIGHTREC_STORE_BEFORE ||
+	    observer.phases[1] != LIGHTREC_STORE_AFTER || observer.values[0] != 0 ||
+	    observer.values[1] != 7 || observer.source_regs[0] != 7 ||
+	    observer.source_regs[1] != 7 || observer.cycles[1] <= observer.cycles[0] ||
+	    lightrec_current_cycle_count(fixture.state) != plain_cycles ||
+	    registers->gpr[10] != plain_result || fixture.ram[0x40 / sizeof(u32)] != 7 ||
+	    stats->translated_blocks <= warm_translations || stats->executed_instructions < 10 ||
+	    stats->fallback_blocks != 0 || stats->fallback_instructions != 0) {
+		fputs("selected interior-store pre/post or sentinel contract failed\n", stderr);
+		fixture_destroy(&fixture);
+		return 1;
+	}
+	printf("selected store: hits=2, unreachable=0/%" PRIu64 " JIT instructions, fallback=0\n",
+	       stats->executed_instructions);
+
+	if (lightrec_set_store_observer(fixture.state, NULL, 0, NULL, NULL)) {
+		fputs("failed to disarm selected-store observer\n", stderr);
+		fixture_destroy(&fixture);
+		return 1;
+	}
+	fixture.ram[0x40 / sizeof(u32)] = 0;
+	*registers = (struct lightrec_registers){0};
+	lightrec_reset_cycle_count(fixture.state, 0);
+	lightrec_execute(fixture.state, 0, 100);
+	stats = lightrec_get_execution_stats(fixture.state);
+	if (observer.calls != 2 || lightrec_current_cycle_count(fixture.state) != plain_cycles ||
+	    registers->gpr[10] != plain_result || fixture.ram[0x40 / sizeof(u32)] != 7 ||
+	    stats->fallback_blocks != 0 || stats->fallback_instructions != 0) {
+		fputs("disarmed selected-store observer changed JIT behavior\n", stderr);
+		fixture_destroy(&fixture);
+		return 1;
+	}
+
+	fixture.ram[0x40 / sizeof(u32)] = 0;
+	*registers = (struct lightrec_registers){0};
+	lightrec_reset_cycle_count(fixture.state, 0);
+	before_unsupported_instructions = stats->executed_instructions;
+	if (lightrec_set_store_observer(fixture.state, &unsupported_target, 1, observe_store,
+					&observer)) {
+		fputs("failed to arm unsupported target control\n", stderr);
+		fixture_destroy(&fixture);
+		return 1;
+	}
+	unsupported_pc = lightrec_execute(fixture.state, 0, 100);
+	stats = lightrec_get_execution_stats(fixture.state);
+	if (unsupported_pc != 0 ||
+	    !(lightrec_exit_flags(fixture.state) & LIGHTREC_EXIT_OBSERVER_UNSUPPORTED) ||
+	    observer.calls != 2 || fixture.ram[0x40 / sizeof(u32)] != 0 ||
+	    stats->executed_instructions != before_unsupported_instructions ||
+	    stats->fallback_blocks != 0 || stats->fallback_instructions != 0) {
+		fputs("unsupported selected-PC target did not fail closed\n", stderr);
+		fixture_destroy(&fixture);
+		return 1;
+	}
+
+	fixture_destroy(&fixture);
+	return 0;
+}
+
+static int test_reordered_store_observer_refuses_false_pc(void)
+{
+	struct store_observer_context observer = {0};
+	const struct lightrec_execution_stats *stats;
+	struct fixture fixture;
+	u32 target = 8;
+	u32 next_pc;
+
+	if (fixture_init(&fixture))
+		return 1;
+	fixture.ram[0] = 0x24080040; /* addiu $t0, $zero, 0x40 */
+	fixture.ram[1] = 0x8d090000; /* lw $t1, 0($t0) */
+	fixture.ram[2] = 0xad090004; /* sw $t1, 4($t0), moved for load delay */
+	fixture.ram[3] = 0x0000000c; /* syscall */
+	fixture.ram[0x40 / sizeof(u32)] = 9;
+	observer.ram = fixture.ram;
+	if (lightrec_set_store_observer(fixture.state, &target, 1, observe_store, &observer)) {
+		fputs("failed to arm reordered-store control\n", stderr);
+		fixture_destroy(&fixture);
+		return 1;
+	}
+	next_pc = lightrec_execute(fixture.state, 0, 100);
+	stats = lightrec_get_execution_stats(fixture.state);
+	if (next_pc != 0 ||
+	    !(lightrec_exit_flags(fixture.state) & LIGHTREC_EXIT_OBSERVER_UNSUPPORTED) ||
+	    observer.calls != 0 || fixture.ram[0x44 / sizeof(u32)] != 0 ||
+	    stats->executed_instructions != 0 || stats->fallback_blocks != 0 ||
+	    stats->fallback_instructions != 0) {
+		fputs("reordered store was falsely attributed to its source PC\n", stderr);
+		fixture_destroy(&fixture);
+		return 1;
+	}
+	fixture_destroy(&fixture);
+	return 0;
+}
+
 static int test_boundary_stop_precedes_lookup_and_execution(void)
 {
 	struct boundary_test_context boundary = {
@@ -599,6 +770,10 @@ int main(void)
 	if (test_diagnostic_interpreter_is_explicit_and_unmixed())
 		return 1;
 	if (test_boundary_callback_observes_cache_hit())
+		return 1;
+	if (test_selected_interior_store_observer())
+		return 1;
+	if (test_reordered_store_observer_refuses_false_pc())
 		return 1;
 	if (test_boundary_stop_precedes_lookup_and_execution())
 		return 1;

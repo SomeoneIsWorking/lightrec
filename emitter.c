@@ -3,14 +3,16 @@
  * Copyright (C) 2014-2021 Paul Cercueil <paul@crapouillou.net>
  */
 
+#include "emitter.h"
 #include "arch.h"
 #include "blockcache.h"
 #include "debug.h"
 #include "disassembler.h"
-#include "emitter.h"
+#include "execution.h"
 #include "lightning-wrapper.h"
 #include "optimizer.h"
 #include "regcache.h"
+#include "store-observer.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -22,18 +24,6 @@ typedef void (*lightrec_rec_func_t)(struct lightrec_cstate *, const struct block
 #define STATS_OFFSET(member)                                                                       \
 	(offsetof(struct lightrec_state, execution_stats) +                                        \
 	 offsetof(struct lightrec_execution_stats, member))
-
-static void lightrec_emit_increment_counter(struct lightrec_cstate *state, jit_state_t *_jit,
-					    size_t counter_offset)
-{
-	struct regcache *reg_cache = state->reg_cache;
-	u8 temporary = lightrec_alloc_reg_temp(reg_cache, _jit);
-
-	jit_ldxi_l(temporary, LIGHTREC_REG_STATE, counter_offset);
-	jit_addi(temporary, temporary, 1);
-	jit_stxi_l(counter_offset, LIGHTREC_REG_STATE, temporary);
-	lightrec_free_reg(reg_cache, temporary);
-}
 
 /* Forward declarations */
 static void rec_SPECIAL(struct lightrec_cstate *state, const struct block *block, u16 offset);
@@ -3045,6 +3035,8 @@ void lightrec_rec_opcode(struct lightrec_cstate *state,
 	const struct opcode *op = &block->opcode_list[offset];
 	jit_state_t *_jit = block->_jit;
 	lightrec_rec_func_t f;
+	bool observe_store =
+	    lightrec_store_observer_matches(state->state, block->pc + (offset << 2));
 	u16 unload_offset;
 
 	if (op_flag_sync(op->flags)) {
@@ -3060,6 +3052,8 @@ void lightrec_rec_opcode(struct lightrec_cstate *state,
 		target->offset = offset;
 		target->label = jit_indirect();
 	}
+	if (observe_store)
+		lightrec_rec_observed_store(state, block, offset, LIGHTREC_STORE_BEFORE);
 
 	if (!offset || op_flag_sync(op->flags))
 		lightrec_emit_increment_counter(state, _jit, STATS_OFFSET(executed_blocks));
@@ -3073,6 +3067,8 @@ void lightrec_rec_opcode(struct lightrec_cstate *state,
 		else
 			(*f)(state, block, offset);
 	}
+	if (observe_store)
+		lightrec_rec_observed_store(state, block, offset, LIGHTREC_STORE_AFTER);
 
 	if (OPT_EARLY_UNLOAD) {
 		unload_offset = offset +

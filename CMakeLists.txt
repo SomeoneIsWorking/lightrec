@@ -15,6 +15,7 @@ list(APPEND LIGHTREC_SOURCES
 	optimizer.c
 	optimizer-delay-slots.c
 	regcache.c
+	store-observer.c
 )
 list(APPEND LIGHTREC_HEADERS
 	blockcache.h
@@ -30,6 +31,7 @@ list(APPEND LIGHTREC_HEADERS
 	memmanager.h
 	optimizer.h
 	regcache.h
+	store-observer.h
 )
 
 add_library(lightrec ${LIGHTREC_SOURCES} ${LIGHTREC_HEADERS})
