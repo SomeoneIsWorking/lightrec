@@ -751,6 +751,45 @@ static int test_exception_context(void)
 	return 0;
 }
 
+static int test_nulled_branch_commits_delay_slot_load(void)
+{
+	struct fixture fixture;
+	struct lightrec_registers *registers;
+
+	if (fixture_init(&fixture))
+		return 1;
+
+	/* A branch whose operand is a known zero is statically never taken, so the optimizer
+	 * replaces it with a NOP. Its delay slot then becomes an ordinary opcode: the load must
+	 * write $a0 directly instead of deferring the write to the branch's end-of-block handler,
+	 * which no longer exists. Measured against Spyro 1's collision query at 0x8004dfac. */
+	fixture.ram[0] = 0x24080000; /* addiu $t0, $zero, 0 */
+	fixture.ram[1] = 0x3c048000; /* lui   $a0, 0x8000 */
+	fixture.ram[2] = 0x24840040; /* addiu $a0, $a0, 0x40 */
+	fixture.ram[3] = 0x1d000002; /* bgtz  $t0, +2 */
+	fixture.ram[4] = 0x8c840000; /*  lw   $a0, 0($a0) */
+	fixture.ram[5] = 0x24820000; /* addiu $v0, $a0, 0 */
+	fixture.ram[6] = 0x24830000; /* addiu $v1, $a0, 0 (branch target, reads $a0) */
+	fixture.ram[7] = 0x0000000c; /* syscall */
+	fixture.ram[0x40 / sizeof(u32)] = 0xa5a5a5a5;
+
+	lightrec_execute(fixture.state, 0, 100);
+	registers = lightrec_get_registers(fixture.state);
+	if (registers->gpr[4] != 0xa5a5a5a5 || registers->gpr[2] != 0xa5a5a5a5 ||
+	    registers->gpr[3] != 0xa5a5a5a5) {
+		fprintf(stderr,
+			"nulled-branch delay slot failed: $a0 = 0x%08" PRIx32 ", $v0 = 0x%08" PRIx32
+			", $v1 = 0x%08" PRIx32 ", expected 0xa5a5a5a5 in all three\n",
+			registers->gpr[4], registers->gpr[2], registers->gpr[3]);
+		fixture_destroy(&fixture);
+		return 1;
+	}
+	puts("nulled branch: delay-slot load committed before its reader");
+
+	fixture_destroy(&fixture);
+	return 0;
+}
+
 int main(void)
 {
 	if (test_exception_context())
@@ -778,6 +817,8 @@ int main(void)
 	if (test_boundary_stop_precedes_lookup_and_execution())
 		return 1;
 	if (test_boundary_redirect_replaces_direct_target())
+		return 1;
+	if (test_nulled_branch_commits_delay_slot_load())
 		return 1;
 	return 0;
 }

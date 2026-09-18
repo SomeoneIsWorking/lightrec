@@ -911,12 +911,29 @@ static void maybe_remove_load_delay(struct opcode *op)
 		op->flags &= ~LIGHTREC_LOAD_DELAY;
 }
 
+/* Replace a branch that can never be taken with a NOP. Its delay slot becomes an ordinary opcode,
+ * so a load there must write its target register immediately: the deferred write is committed by
+ * the branch's end-of-block handler, which is no longer emitted once the branch is gone. */
+static void nullify_branch(struct block *block, unsigned int offset)
+{
+	struct opcode *list = block->opcode_list;
+	bool local = op_flag_local_branch(list[offset].flags);
+
+	if (!op_flag_no_ds(list[offset].flags) && offset + 1 < block->nb_ops)
+		maybe_remove_load_delay(&list[offset + 1]);
+
+	list[offset].opcode = 0;
+	list[offset].flags = 0;
+
+	if (local)
+		lightrec_reset_syncs(block);
+}
+
 static int lightrec_transform_ops(struct lightrec_state *state, struct block *block)
 {
 	struct opcode *op, *list = block->opcode_list;
 	struct constprop_data v[32] = LIGHTREC_CONSTPROP_INITIALIZER;
 	unsigned int i;
-	bool local;
 	int idx;
 	u8 tmp;
 
@@ -932,7 +949,14 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 		if (op->opcode != 0 && is_nop(op->c)) {
 			pr_debug("Converting useless opcode "X32_FMT" to NOP\n",
 				 op->opcode);
-			op->opcode = 0x0;
+
+			/* A branch whose condition is statically false reaches this
+			 * generic case as well, for instance after a known-zero
+			 * operand turns BGTZ $rs into BGTZ $zero. */
+			if (has_delay_slot(op->c))
+				nullify_branch(block, i);
+			else
+				op->opcode = 0x0;
 		}
 
 		if (!op->opcode)
@@ -952,15 +976,7 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 				   (v[op->i.rs].value ^ v[op->i.rt].value)) {
 				pr_debug("Found never-taken BEQ\n");
 
-				if (!op_flag_no_ds(op->flags))
-					maybe_remove_load_delay(&list[i + 1]);
-
-				local = op_flag_local_branch(op->flags);
-				op->opcode = 0;
-				op->flags = 0;
-
-				if (local)
-					lightrec_reset_syncs(block);
+				nullify_branch(block, i);
 			} else if (op->i.rs == 0) {
 				op->i.rs = op->i.rt;
 				op->i.rt = 0;
@@ -979,15 +995,7 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 				   v[op->i.rs].value == v[op->i.rt].value) {
 				pr_debug("Found never-taken BNE\n");
 
-				if (!op_flag_no_ds(op->flags))
-					maybe_remove_load_delay(&list[i + 1]);
-
-				local = op_flag_local_branch(op->flags);
-				op->opcode = 0;
-				op->flags = 0;
-
-				if (local)
-					lightrec_reset_syncs(block);
+				nullify_branch(block, i);
 			} else if (op->i.rs == 0) {
 				op->i.rs = op->i.rt;
 				op->i.rt = 0;
@@ -1010,15 +1018,7 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 			    v[op->i.rs].value & BIT(31)) {
 				pr_debug("Found never-taken BGTZ\n");
 
-				if (!op_flag_no_ds(op->flags))
-					maybe_remove_load_delay(&list[i + 1]);
-
-				local = op_flag_local_branch(op->flags);
-				op->opcode = 0;
-				op->flags = 0;
-
-				if (local)
-					lightrec_reset_syncs(block);
+				nullify_branch(block, i);
 			}
 			break;
 
@@ -1105,15 +1105,7 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 				} else {
 					pr_debug("Found never-taken BLTZ/BGEZ\n");
 
-					if (!op_flag_no_ds(op->flags))
-						maybe_remove_load_delay(&list[i + 1]);
-
-					local = op_flag_local_branch(op->flags);
-					op->opcode = 0;
-					op->flags = 0;
-
-					if (local)
-						lightrec_reset_syncs(block);
+					nullify_branch(block, i);
 				}
 				break;
 			case OP_REGIMM_BLTZAL:
