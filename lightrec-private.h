@@ -155,22 +155,6 @@ struct lightrec_cstate {
 
 	_Bool no_load_delay;
 	_Bool in_delay_slot;
-
-	/* True between lightrec_regcache_enter_branch() and lightrec_regcache_leave_branch() in
-	 * rec_b, i.e. while rec_b holds a backup of `lightrec_regs` that it will memcpy back
-	 * when the branch finishes. */
-	_Bool in_branch;
-	/* Set by lightrec_rec_observed_store() when the store observer cleaned and reset the
-	 * register cache while `in_branch` was set. That reset changes the cache INSIDE the
-	 * window the backup describes, so rec_b must re-take the backup before leaving the
-	 * branch; otherwise leave_branch restores a mapping that no longer matches what was
-	 * emitted, and generated code reads registers the cache believes are resident in
-	 * native registers when the observer has spilled them. Without this the observer
-	 * crashes the process on any store in a branch delay slot.
-	 *
-	 * `in_branch` is the guard that makes regs_backup valid here: the dirty flag can only
-	 * be set while a backup is live, so there is never a re-take of an uninitialised one. */
-	_Bool store_observer_dirty_in_branch;
 };
 
 struct lightrec_state {

@@ -311,7 +311,6 @@ static void rec_b(struct lightrec_cstate *state, const struct block *block, u16 
 
 		lightrec_free_regs(reg_cache);
 		regs_backup = lightrec_regcache_enter_branch(reg_cache);
-		state->in_branch = true;
 	}
 
 	if (op_flag_local_branch(op->flags)) {
@@ -363,23 +362,7 @@ static void rec_b(struct lightrec_cstate *state, const struct block *block, u16 
 		if (!no_indirection)
 			jit_patch(addr);
 
-		/* A store observer armed on a delay slot inside this branch cleaned and reset
-		 * the register cache, and leave_branch below memcpy's regs_backup back over
-		 * lightrec_regs - discarding that reset and leaving the cache claiming registers
-		 * are resident in native registers when the observer has spilled them. The
-		 * generated code then reads them wrong and the process crashes. Re-take the
-		 * backup here, which is after BOTH delay-slot paths have run: the local one just
-		 * above, and the non-local one inside lightrec_emit_end_of_block(). Re-taking
-		 * earlier would miss the second. The observer is not suppressed - the store was
-		 * still counted, which is the point. */
-		if (unlikely(state->store_observer_dirty_in_branch)) {
-			lightrec_regcache_leave_branch(reg_cache, regs_backup);
-			regs_backup = lightrec_regcache_enter_branch(reg_cache);
-			state->store_observer_dirty_in_branch = false;
-		}
-
 		lightrec_regcache_leave_branch(reg_cache, regs_backup);
-		state->in_branch = false;
 
 		if (bz && link)
 			update_ra_register(reg_cache, _jit, 31, block->pc, link);
