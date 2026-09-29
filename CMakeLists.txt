@@ -135,6 +135,20 @@ if (BUILD_TESTING)
 	target_link_libraries(lightrec_runtime_contract_test PRIVATE lightrec)
 	add_test(NAME lightrec_runtime_contract COMMAND lightrec_runtime_contract_test)
 
+	add_executable(lightrec_invalidation_contract_test tests/invalidation_contract_test.c)
+	target_link_libraries(lightrec_invalidation_contract_test PRIVATE lightrec)
+	# The contract test reads the code LUT and the block cache directly, to
+	# check the invariant the invalidation guard depends on.
+	target_include_directories(lightrec_invalidation_contract_test
+		PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+	add_test(NAME lightrec_invalidation_contract
+		COMMAND lightrec_invalidation_contract_test)
+
+	add_executable(lightrec_invalidation_cost_probe tests/invalidation_cost_probe.c)
+	target_link_libraries(lightrec_invalidation_cost_probe PRIVATE lightrec)
+	add_test(NAME lightrec_invalidation_cost
+		COMMAND lightrec_invalidation_cost_probe)
+
 	find_package(Python3 REQUIRED COMPONENTS Interpreter)
 	add_test(NAME lightrec_source_contract
 		COMMAND ${Python3_EXECUTABLE}
