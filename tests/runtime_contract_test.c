@@ -1,23 +1,12 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
+#include "dynarec_fixture.h"
 #include "lightrec.h"
 
 #include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
-
-#define RAM_SIZE_BYTES 0x200000u
-#define BIOS_SIZE_BYTES 0x80000u
-#define SCRATCH_SIZE_BYTES 0x400u
-
-struct fixture {
-	struct lightrec_mem_map maps[PSX_MAP_CODE_BUFFER + 1];
-	struct lightrec_state *state;
-	u32 *ram;
-	u8 *bios;
-	u8 *scratch;
-};
 
 enum boundary_test_mode {
 	BOUNDARY_CONTINUE,
@@ -73,16 +62,6 @@ static void observe_store(const struct lightrec_registers *registers, u32 guest_
 	context->source_regs[index] = registers->gpr[9];
 	context->cycles[index] = cycle;
 	context->phases[index] = phase;
-}
-
-static void fixture_destroy(struct fixture *fixture)
-{
-	if (fixture->state)
-		lightrec_destroy(fixture->state);
-	free(fixture->scratch);
-	free(fixture->bios);
-	free(fixture->ram);
-	*fixture = (struct fixture){0};
 }
 
 static void cop2_op(struct lightrec_state *state, u32 opcode)
@@ -146,49 +125,13 @@ static int fixture_init_with_callbacks(struct fixture *fixture,
 	    .fallback_admission_data = fallback_context,
 	};
 
-	*fixture = (struct fixture){0};
-	fixture->ram = calloc(1, RAM_SIZE_BYTES);
-	fixture->bios = calloc(1, BIOS_SIZE_BYTES);
-	fixture->scratch = calloc(1, SCRATCH_SIZE_BYTES);
-	if (!fixture->ram || !fixture->bios || !fixture->scratch) {
-		fixture_destroy(fixture);
-		return -1;
-	}
-
-	fixture->maps[PSX_MAP_KERNEL_USER_RAM] = (struct lightrec_mem_map){
-	    .pc = 0,
-	    .length = RAM_SIZE_BYTES,
-	    .address = fixture->ram,
-	};
-	fixture->maps[PSX_MAP_BIOS] = (struct lightrec_mem_map){
-	    .pc = 0x1fc00000,
-	    .length = BIOS_SIZE_BYTES,
-	    .address = fixture->bios,
-	};
-	fixture->maps[PSX_MAP_SCRATCH_PAD] = (struct lightrec_mem_map){
-	    .pc = 0x1f800000,
-	    .length = SCRATCH_SIZE_BYTES,
-	    .address = fixture->scratch,
-	};
-
-	fixture->state = lightrec_init("lightrec_runtime_contract_test", fixture->maps,
-				       PSX_MAP_CODE_BUFFER + 1, &ops);
-	if (!fixture->state) {
-		fixture_destroy(fixture);
-		return -1;
-	}
-	return 0;
+	return fixture_init_ops(fixture, "lightrec_runtime_contract_test", &ops);
 }
 
 static int fixture_init_with_boundary(struct fixture *fixture,
 				      struct boundary_test_context *boundary_context)
 {
 	return fixture_init_with_callbacks(fixture, boundary_context, NULL);
-}
-
-static int fixture_init(struct fixture *fixture)
-{
-	return fixture_init_with_callbacks(fixture, NULL, NULL);
 }
 
 static _Bool fallback_totals_match(const struct lightrec_execution_stats *stats)
@@ -230,7 +173,7 @@ static int test_cold_block_jits_without_fallback(void)
 	const struct lightrec_execution_stats *stats;
 	struct lightrec_registers *registers;
 
-	if (fixture_init(&fixture))
+	if (fixture_init(&fixture, "lightrec_runtime_contract_test"))
 		return 1;
 	fixture.ram[0] = 0x2402002a; /* addiu $v0, $zero, 42 */
 	fixture.ram[1] = 0x0000000c; /* syscall */
@@ -257,7 +200,7 @@ static int test_unsupported_block_has_typed_fallback(void)
 	const struct lightrec_execution_stats *stats;
 	const struct lightrec_fallback_event *event;
 
-	if (fixture_init(&fixture))
+	if (fixture_init(&fixture, "lightrec_runtime_contract_test"))
 		return 1;
 	fixture.ram[0] = 0x10000001; /* beq with a branch in its delay slot */
 	fixture.ram[1] = 0x08000003;
@@ -359,7 +302,7 @@ static int test_unsafe_fetch_is_not_silent(void)
 	const struct lightrec_fallback_event *event;
 	const u32 invalid_pc = 0x1a000000;
 
-	if (fixture_init(&fixture))
+	if (fixture_init(&fixture, "lightrec_runtime_contract_test"))
 		return 1;
 	lightrec_execute(fixture.state, invalid_pc, 20);
 	stats = lightrec_get_execution_stats(fixture.state);
@@ -423,7 +366,7 @@ static int test_diagnostic_interpreter_is_explicit_and_unmixed(void)
 	const struct lightrec_execution_stats *stats;
 	struct lightrec_registers *registers;
 
-	if (fixture_init(&fixture))
+	if (fixture_init(&fixture, "lightrec_runtime_contract_test"))
 		return 1;
 	fixture.ram[0] = 0x2402002a; /* addiu $v0, $zero, 42 */
 	fixture.ram[1] = 0x0000000c; /* syscall */
@@ -491,7 +434,7 @@ static int test_selected_interior_store_observer(void)
 	u32 plain_cycles, plain_result;
 	u32 unsupported_pc;
 
-	if (fixture_init(&fixture))
+	if (fixture_init(&fixture, "lightrec_runtime_contract_test"))
 		return 1;
 	fixture.ram[0] = 0x24080040; /* addiu $t0, $zero, 0x40 */
 	fixture.ram[1] = 0x24090007; /* addiu $t1, $zero, 7 */
@@ -593,7 +536,7 @@ static int test_reordered_store_observer_refuses_false_pc(void)
 	u32 target = 8;
 	u32 next_pc;
 
-	if (fixture_init(&fixture))
+	if (fixture_init(&fixture, "lightrec_runtime_contract_test"))
 		return 1;
 	fixture.ram[0] = 0x24080040; /* addiu $t0, $zero, 0x40 */
 	fixture.ram[1] = 0x8d090000; /* lw $t1, 0($t0) */
@@ -708,7 +651,7 @@ static int test_exception_context(void)
 				const struct lightrec_execution_stats *stats;
 				u32 pc,
 				    flags = exception ? LIGHTREC_EXIT_BREAK : LIGHTREC_EXIT_SYSCALL;
-				if (fixture_init(&fixture))
+				if (fixture_init(&fixture, "lightrec_runtime_contract_test"))
 					return 1;
 				/* Entering the instruction directly must not inherit the
 				 * preceding branch's delay-slot context. */
@@ -756,7 +699,7 @@ static int test_nulled_branch_commits_delay_slot_load(void)
 	struct fixture fixture;
 	struct lightrec_registers *registers;
 
-	if (fixture_init(&fixture))
+	if (fixture_init(&fixture, "lightrec_runtime_contract_test"))
 		return 1;
 
 	/* A branch whose operand is a known zero is statically never taken, so the optimizer

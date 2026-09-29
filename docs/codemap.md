@@ -10,6 +10,6 @@
 | Selected translated-store observer | `lightrec.h`, `lightrec.c`, `store-observer.c`, `emitter.c` | `lightrec_set_store_observer`; source-PC provenance in `disassembler.h`/`optimizer-delay-slots.c`, cache retirement in `blockcache.c` |
 | Fallback semantics and instruction counters | `interpreter.c` | `lightrec_emulate_block`, `lightrec_record_fallback_instruction` |
 | Trapping instruction PC and delay-slot context | `emitter.c`, `interpreter.c`, `lightrec-private.h` | `lightrec_exception_flags`; `LIGHTREC_EXIT_EXCEPTION_DELAY_SLOT` qualifies public SYSCALL/BREAK exits |
-| Native block ownership and invalidation | `blockcache.c` | block registration, lookup, invalidation, reclamation |
+| Native block ownership and invalidation | `blockcache.c` | block registration, lookup, the one cache walk shared by reclamation and `lightrec_invalidate_blocks`; block extent in `block_end_pc`/`block_overlaps_range` (`lightrec-private.h`) |
 | Host capability policy | `cmake/LightrecHost.cmake` | `lightrec_require_proven_host` |
-| Contract verification | `tests/`, `tools/` | runtime, source-boundary, host-policy, format, analyzer, and structure tests |
+| Contract verification | `tests/`, `tools/` | runtime and changed-code invalidation contracts, the invalidation cost probe, the shared `tests/dynarec_fixture.h` machine, source-boundary, host-policy, format, analyzer, and structure tests |

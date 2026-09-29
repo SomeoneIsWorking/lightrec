@@ -353,6 +353,20 @@ static inline _Bool block_has_flag(const struct block *block, u8 flag)
 	return block->flags & flag;
 }
 
+/* A block's guest extent is the run of translated words that begins at its PC
+ * and is exactly nb_ops long. Code-LUT registration, lookup, self-modifying
+ * detection, and range invalidation all measure the end of a block from here
+ * rather than each deriving it again. */
+static inline u32 block_end_pc(const struct block *block)
+{
+	return kunseg(block->pc) + (block->nb_ops << 2);
+}
+
+static inline _Bool block_overlaps_range(const struct block *block, u32 begin, u32 end)
+{
+	return kunseg(block->pc) < end && begin < block_end_pc(block);
+}
+
 static inline u8 block_set_flags(struct block *block, u8 mask)
 {
 	u8 flags = block->flags;

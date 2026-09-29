@@ -71,6 +71,55 @@ events, including retranslations. `executed_blocks` and
 `cache_misses` counts dispatches requiring synchronous lookup, compilation, or
 bounded fallback.
 
+## Changed guest code
+
+`lightrec_invalidate(state, addr, len)` reports that a guest RAM range changed,
+whether the write came from an emulated store, a DMA, a module load, a
+savestate, or the host's own memory API. A block is a run of translated words
+starting at its PC, so the contract is that **every registered block whose
+extent overlaps the range is revoked**, not only a block that starts inside it.
+An interior-word write is therefore honoured, and so is a two-byte write that
+splits a four-byte instruction.
+
+Revocation drops the block's whole code-LUT span, which covers both its first
+word and any interior label a guest branch can enter it through. The block keeps
+its memory and revalidates on the next entry: `lightrec_block_is_outdated()`
+compares the guest bytes against the hash taken at translation, restores the LUT
+entry when they are unchanged, and recompiles the block when they are not. A
+write that changes no byte therefore costs a hash comparison and not a
+recompilation, and nothing is freed during invalidation, which is what makes the
+call safe from inside a running block - the case a self-modifying store reaches.
+`lightrec_invalidate_all()` empties the code LUT instead of walking, which
+revokes every block at once and is correct for the same reason: every block then
+revalidates on its next entry.
+
+The call runs for every guest store, so it is guarded. The block cache records
+which code words a block was registered over, and a range holding none of them
+is answered by that test alone. The record is per code word and is never
+cleared, so a word that only ever held translated code can cost one wasted walk
+later, while a word that never held code is never walked for. Reclamation and
+range invalidation share one walk of the block cache.
+
+`invalidations` counts the calls, `invalidation_words` the code words they
+examined, `invalidation_guards` the calls the translated-word test answered on
+its own, `invalidation_scans` the registered blocks a walk examined, and
+`invalidated_blocks` the blocks a walk revoked. A consumer that reports no
+invalidation must publish those denominators with it: a zero with
+`invalidation_guards` above zero is a scanned negative, and a zero with
+`invalidation_scans` above zero is a walk that looked and matched nothing.
+
+The two paths cost very differently, and `tests/invalidation_cost_probe.c`
+measures both. A store into a word no block covers, and an empty range, are
+answered by the translated-word test alone in single-digit nanoseconds, which is
+the case that runs for every guest store. A store that does hit a translated
+block walks the cache, which costs microseconds; that is a guest store landing
+inside translated code - self-modifying code, a module load, a decompression -
+and not the per-frame data-store path. The record is deliberately never
+cleared, so a repeated write of an already-revoked range still pays the walk;
+clearing it would make the guard unsound if a revalidation restored the block
+without re-marking its words, which is the same class of defect this contract
+exists to prevent.
+
 Consumers must publish JIT, admitted fallback, and refused fallback totals from
 `lightrec_execution_stats`. At minimum, they must refuse a “dynarec-verified” result unless
 `lightrec_execution_is_dynarec_dominated()` returns true. Stricter project

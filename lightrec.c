@@ -270,10 +270,8 @@ static void lightrec_lwc2(struct lightrec_state *state, union code op,
 static void lightrec_invalidate_map(struct lightrec_state *state,
 		const struct lightrec_mem_map *map, u32 addr, u32 len)
 {
-	if (map == &state->maps[PSX_MAP_KERNEL_USER_RAM]) {
-		memset(lut_address(state, lut_offset(addr)), 0,
-		       ((len + 3) / 4) * lut_elm_size(state));
-	}
+	if (map == &state->maps[PSX_MAP_KERNEL_USER_RAM])
+		lightrec_invalidate_blocks(state->block_cache, addr, len);
 }
 
 static enum psx_map
@@ -2002,13 +2000,11 @@ void lightrec_invalidate(struct lightrec_state *state, u32 addr, u32 len)
 		kaddr &= RAM_SIZE - 1;
 		fallthrough;
 	case PSX_MAP_KERNEL_USER_RAM:
-		break;
+		lightrec_invalidate_blocks(state->block_cache, kaddr, len);
+		return;
 	default:
 		return;
 	}
-
-	memset(lut_address(state, lut_offset(kaddr)), 0,
-	       ((len + 3) / 4) * lut_elm_size(state));
 }
 
 void lightrec_invalidate_all(struct lightrec_state *state)

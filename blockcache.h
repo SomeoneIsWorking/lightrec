@@ -23,6 +23,12 @@ void lightrec_free_block_cache(struct blockcache *cache);
 
 void lightrec_free_all_blocks(struct blockcache *cache);
 
+/* Revoke every registered block whose translated extent overlaps the changed
+ * guest RAM range [addr, addr + len). Blocks keep their memory and revalidate
+ * their content on the next entry, so this is safe to call from inside a
+ * running block. */
+void lightrec_invalidate_blocks(struct blockcache *cache, u32 addr, u32 len);
+
 u32 lightrec_calculate_block_hash(const struct block *block);
 _Bool lightrec_block_is_outdated(struct lightrec_state *state, struct block *block);
 

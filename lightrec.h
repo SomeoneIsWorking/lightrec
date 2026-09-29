@@ -122,6 +122,16 @@ struct lightrec_execution_stats {
 	u64 translated_instructions;
 	u64 cache_hits;
 	u64 cache_misses;
+	/* Ranged invalidation, with the denominators that show whether the work
+	 * ran: invalidations counts the calls, invalidation_words the code words
+	 * they examined, invalidation_guards the calls the translated-word test
+	 * answered alone, invalidation_scans the registered blocks a walk
+	 * examined, and invalidated_blocks the blocks a walk revoked. */
+	u64 invalidations;
+	u64 invalidation_words;
+	u64 invalidation_guards;
+	u64 invalidation_scans;
+	u64 invalidated_blocks;
 };
 
 /* Exit flags */

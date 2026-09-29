@@ -1729,7 +1729,7 @@ static int lightrec_flag_io(struct lightrec_state *state, struct block *block)
 			 * occur, we mark the blocks as not compilable. */
 			if (is_known(v, list->i.rs) &&
 			    kunseg(v[list->i.rs].value) >= kunseg(block->pc) &&
-			    kunseg(v[list->i.rs].value) < (kunseg(block->pc) + block->nb_ops * 4)) {
+			    kunseg(v[list->i.rs].value) < block_end_pc(block)) {
 				pr_debug("Self-modifying block detected\n");
 				block_set_flags(block, BLOCK_NEVER_COMPILE);
 				list->flags |= LIGHTREC_SMC;
