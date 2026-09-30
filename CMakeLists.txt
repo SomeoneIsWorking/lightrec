@@ -144,6 +144,13 @@ if (BUILD_TESTING)
 	add_test(NAME lightrec_invalidation_contract
 		COMMAND lightrec_invalidation_contract_test)
 
+	add_executable(lightrec_smc_detection_test tests/smc_detection_test.c)
+	target_link_libraries(lightrec_smc_detection_test PRIVATE lightrec)
+	# The contract test reads the optimizer's decision off the block it built.
+	target_include_directories(lightrec_smc_detection_test
+		PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+	add_test(NAME lightrec_smc_detection COMMAND lightrec_smc_detection_test)
+
 	add_executable(lightrec_invalidation_cost_probe tests/invalidation_cost_probe.c)
 	target_link_libraries(lightrec_invalidation_cost_probe PRIVATE lightrec)
 	add_test(NAME lightrec_invalidation_cost

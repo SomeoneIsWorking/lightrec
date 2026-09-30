@@ -1701,7 +1701,7 @@ static int lightrec_flag_io(struct lightrec_state *state, struct block *block)
 	enum psx_map psx_map;
 	struct constprop_data v[32] = LIGHTREC_CONSTPROP_INITIALIZER;
 	unsigned int i;
-	u32 val, kunseg_val;
+	u32 kunseg_val;
 	bool no_mask;
 
 	for (i = 0; i < block->nb_ops; i++) {
@@ -1713,6 +1713,8 @@ static int lightrec_flag_io(struct lightrec_state *state, struct block *block)
 		case OP_SB:
 		case OP_SH:
 		case OP_SW:
+		case OP_SWL:
+		case OP_SWR:
 			/* Mark all store operations that target $sp or $gp
 			 * as not requiring code invalidation. This is based
 			 * on the heuristic that stores using one of these
@@ -1726,17 +1728,27 @@ static int lightrec_flag_io(struct lightrec_state *state, struct block *block)
 
 			/* Detect writes whose destination address is inside the
 			 * current block, using constant propagation. When these
-			 * occur, we mark the blocks as not compilable. */
+			 * occur, we mark the blocks as not compilable. The address
+			 * is the base register's known value plus the store's own
+			 * displacement: a base that merely falls inside the block's
+			 * range, with the displacement carrying the store out of
+			 * it, is an ordinary data store and the block is
+			 * compilable. The two unaligned word stores reach only
+			 * across the word containing the address they name, so for
+			 * those the named byte alone decides; the reach is passed
+			 * to block_writes_own_text, which says why. */
 			if (is_known(v, list->i.rs) &&
-			    kunseg(v[list->i.rs].value) >= kunseg(block->pc) &&
-			    kunseg(v[list->i.rs].value) < block_end_pc(block)) {
+			    block_writes_own_text(
+				block,
+				block_effective_address(v[list->i.rs].value, (s16)list->i.imm),
+				(list->i.op == OP_SWL || list->i.op == OP_SWR)
+				    ? 1u
+				    : opcode_get_io_size(list->c) / 8u)) {
 				pr_debug("Self-modifying block detected\n");
 				block_set_flags(block, BLOCK_NEVER_COMPILE);
 				list->flags |= LIGHTREC_SMC;
 			}
 			fallthrough;
-		case OP_SWL:
-		case OP_SWR:
 		case OP_SWC2:
 		case OP_LB:
 		case OP_LBU:
@@ -1756,8 +1768,8 @@ static int lightrec_flag_io(struct lightrec_state *state, struct block *block)
 
 				list->flags &= ~LIGHTREC_IO_MASK;
 
-				val = v[list->i.rs].value + (s16) list->i.imm;
-				kunseg_val = kunseg(val);
+				kunseg_val =
+				    block_effective_address(v[list->i.rs].value, (s16)list->i.imm);
 
 				no_mask = (v[list->i.rs].known & ~v[list->i.rs].value
 					   & 0xe0000000) == 0xe0000000;
