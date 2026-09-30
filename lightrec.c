@@ -324,7 +324,7 @@ u32 lightrec_rw(struct lightrec_state *state, union code op, u32 base,
 	u32 addr;
 	void *host;
 
-	addr = kunseg(base + (s16) op.i.imm);
+	addr = block_effective_address(base, (s16)op.i.imm);
 
 	map = lightrec_get_map(state, &host, addr);
 	if (!map) {

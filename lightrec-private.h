@@ -367,6 +367,36 @@ static inline _Bool block_overlaps_range(const struct block *block, u32 begin, u
 	return kunseg(block->pc) < end && begin < block_end_pc(block);
 }
 
+/* The guest address a memory instruction actually touches: the base register's
+ * value plus the sign-extended 16-bit displacement, masked into the same guest
+ * space block extents are measured in. A base register on its own is not an
+ * address - `lui $at,0x8006` names the first word of a data page, and only the
+ * displacement says whether an instruction reads or writes there - so every
+ * question about where an access lands is asked of this value, never of the
+ * base. */
+static inline u32 block_effective_address(u32 base, s16 disp)
+{
+	return kunseg(base + (s32)disp);
+}
+
+/* Whether an access that writes `len` bytes upward from an already-masked
+ * effective address lands inside the block's own translated text. Self-
+ * modifying detection is exactly this question: a store whose resolved target
+ * is one of the block's own words rewrites code that is already running.
+ *
+ * `len` is the access's upward reach, not its nominal width. An unaligned
+ * `swl` writes down from the byte it names to the start of the word containing
+ * it and an `swr` up to that word's end, so neither reaches a byte the named
+ * address does not name: a block extent is word aligned, so the word they
+ * share is entirely inside or entirely outside it, and the named byte alone
+ * decides them. A reach of four would report a store that only touches the
+ * words BELOW the block as self-modifying, which is the defect this rule was
+ * fixed for. */
+static inline _Bool block_writes_own_text(const struct block *block, u32 addr, u32 len)
+{
+	return block_overlaps_range(block, addr, addr + len);
+}
+
 static inline u8 block_set_flags(struct block *block, u8 mask)
 {
 	u8 flags = block->flags;
