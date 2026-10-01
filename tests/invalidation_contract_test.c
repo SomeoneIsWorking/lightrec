@@ -384,6 +384,203 @@ static int test_long_range_revokes_every_block(void)
 	return failed;
 }
 
+/* A store into the extent of a block that is already revoked must still reach
+ * the block once it has been revalidated or retranslated: the revoked state is
+ * per entry, never remembered by the invalidation index. Three changes, the
+ * second made into an extent that is revoked and has not run since the first. */
+static int test_store_into_revoked_then_retranslated_extent(void)
+{
+	struct lightrec_registers *registers;
+	struct fixture fixture;
+	int failed = 0;
+
+	if (fixture_init(&fixture, "lightrec_invalidation_contract"))
+		return 1;
+
+	fixture.ram[0] = 0x03e00008; /* jr $ra */
+	fixture.ram[1] = 0x24020001; /* addiu $v0, $zero, 1 (delay slot) */
+	install_syscall(&fixture);
+
+	registers = run_program(&fixture, 0);
+	failed |= expect_register(registers, 2, 1, "revoked extent baseline");
+
+	fixture.ram[1] = 0x24020002;
+	lightrec_invalidate(fixture.state, 4, 4);
+	fixture.ram[1] = 0x24020003; /* a second store into the revoked extent */
+	lightrec_invalidate(fixture.state, 4, 4);
+
+	registers = run_program(&fixture, 0);
+	failed |= expect_register(registers, 2, 3, "store into revoked extent");
+
+	fixture.ram[1] = 0x24020004; /* the retranslated block must be revoked too */
+	lightrec_invalidate(fixture.state, 4, 4);
+	registers = run_program(&fixture, 0);
+	failed |= expect_register(registers, 2, 4, "store into retranslated extent");
+
+	fixture_destroy(&fixture);
+	return failed;
+}
+
+/* A block that starts on one invalidation page and ends on a later one must be
+ * found from a store that lies only in the later page. */
+#define LONG_BLOCK_PC 0x10000u
+#define LONG_BLOCK_WORDS 1100u /* more than one 4 KiB page of code */
+
+static int test_store_in_later_page_of_a_long_block(void)
+{
+	struct lightrec_registers *registers;
+	struct fixture fixture;
+	u32 base = LONG_BLOCK_PC / sizeof(u32), store_word = base + LONG_BLOCK_WORDS - 10;
+	unsigned int i;
+	int failed = 0;
+
+	if (fixture_init(&fixture, "lightrec_invalidation_contract"))
+		return 1;
+
+	for (i = 0; i < LONG_BLOCK_WORDS - 2; i++)
+		fixture.ram[base + i] = 0x24420001;
+	fixture.ram[base + LONG_BLOCK_WORDS - 2] = 0x03e00008; /* jr $ra */
+	fixture.ram[base + LONG_BLOCK_WORDS - 1] = 0x24420001; /* delay slot */
+	install_syscall(&fixture);
+
+	registers = run_program(&fixture, LONG_BLOCK_PC);
+	failed |= expect_register(registers, 2, LONG_BLOCK_WORDS - 1, "long block baseline");
+
+	fixture.ram[store_word] = 0x24420005;
+	lightrec_invalidate(fixture.state, store_word * sizeof(u32), 4);
+
+	registers = run_program(&fixture, LONG_BLOCK_PC);
+	failed |= expect_register(registers, 2, LONG_BLOCK_WORDS - 1 + 4, "long block after write");
+
+	fixture_destroy(&fixture);
+	return failed;
+}
+
+/* The translated-word guard is exact in both directions when a block leaves the
+ * cache. Two blocks overlap on words 2..4: unregistering the longer one must
+ * leave the words the survivor covers guarded (a store there still revokes it)
+ * and must release the words only the departed block covered (a store there is
+ * answered by the guard alone). */
+static int test_guard_follows_unregistered_blocks(void)
+{
+	struct lightrec_execution_stats stats_before;
+	const struct lightrec_execution_stats *stats;
+	struct lightrec_registers *registers;
+	struct fixture fixture;
+	struct block *longer;
+	int failed = 0;
+
+	if (fixture_init(&fixture, "lightrec_invalidation_contract"))
+		return 1;
+
+	fixture.ram[0] = 0x24020001; /* addiu $v0, $zero, 1 */
+	fixture.ram[1] = 0x24030002; /* addiu $v1, $zero, 2 */
+	fixture.ram[2] = 0x24040003; /* addiu $a0, $zero, 3 */
+	fixture.ram[3] = 0x03e00008; /* jr $ra */
+	fixture.ram[4] = 0x24050004; /* addiu $a1, $zero, 4 (delay slot) */
+	install_syscall(&fixture);
+
+	/* Enter at word 2 first so a shorter block exists, then at word 0 so a
+	 * longer block overlaps it. */
+	run_program(&fixture, 8);
+	registers = run_program(&fixture, 0);
+	failed |= expect_register(registers, 5, 4, "overlap baseline");
+
+	longer = lightrec_find_block(fixture.state->block_cache, 0);
+	if (!longer || !lightrec_find_block(fixture.state->block_cache, 8)) {
+		fputs("guard overlap: expected two registered blocks\n", stderr);
+		fixture_destroy(&fixture);
+		return 1;
+	}
+	remove_from_code_lut(fixture.state->block_cache, longer);
+	lightrec_unregister_block(fixture.state->block_cache, longer);
+	lightrec_free_block(fixture.state, longer);
+
+	stats = lightrec_get_execution_stats(fixture.state);
+	stats_before = *stats;
+
+	/* Words 0..1 were covered only by the departed block. */
+	lightrec_invalidate(fixture.state, 0, 8);
+	if (stats->invalidation_guards != stats_before.invalidation_guards + 1 ||
+	    stats->invalidation_scans != stats_before.invalidation_scans) {
+		fprintf(stderr,
+			"released words still walked: guards %" PRIu64 " -> %" PRIu64
+			", scans %" PRIu64 " -> %" PRIu64 "\n",
+			stats_before.invalidation_guards, stats->invalidation_guards,
+			stats_before.invalidation_scans, stats->invalidation_scans);
+		failed = 1;
+	}
+
+	/* Dropping the longer block cleared the survivor's code-LUT entry too, as
+	 * its extent covers it. Running the survivor restores that entry. */
+	registers = run_program(&fixture, 8);
+	failed |= expect_register(registers, 5, 4, "survivor after its overlap left");
+
+	/* Word 3 is still covered by the survivor. */
+	lightrec_invalidate(fixture.state, 12, 4);
+	if (stats->invalidation_guards != stats_before.invalidation_guards + 1 ||
+	    stats->invalidated_blocks != stats_before.invalidated_blocks + 1) {
+		fprintf(stderr,
+			"survivor's words lost their guard: guards %" PRIu64 " -> %" PRIu64
+			", revoked %" PRIu64 " -> %" PRIu64 "\n",
+			stats_before.invalidation_guards, stats->invalidation_guards,
+			stats_before.invalidated_blocks, stats->invalidated_blocks);
+		failed = 1;
+	}
+
+	fixture_destroy(&fixture);
+	return failed;
+}
+
+/* A walk examines only the blocks that can overlap the range, not every block:
+ * with a sweep of distinct blocks, a store into one of them examines a number
+ * of blocks bounded by its page, far below the total. */
+static int test_walk_examines_only_nearby_blocks(void)
+{
+	const struct lightrec_execution_stats *stats;
+	struct fixture fixture;
+	u64 scans_before, revoked_before, translated;
+	unsigned int i, j, w, blocks = 4 * 128;
+	int failed = 0;
+
+	if (fixture_init(&fixture, "lightrec_invalidation_contract"))
+		return 1;
+
+	for (i = 0; i < blocks; i++) {
+		w = i * SWEEP_STRIDE;
+		for (j = 0; j < SWEEP_STRIDE - 2; j++)
+			fixture.ram[w + j] = 0x24420001;
+		fixture.ram[w + SWEEP_STRIDE - 2] = 0x08000000 | (w + SWEEP_STRIDE);
+		fixture.ram[w + SWEEP_STRIDE - 1] = 0x24420001;
+	}
+	fixture.ram[blocks * SWEEP_STRIDE] = 0x0000000c; /* syscall */
+	run_program(&fixture, 0);
+
+	stats = lightrec_get_execution_stats(fixture.state);
+	translated = stats->translated_blocks;
+	scans_before = stats->invalidation_scans;
+	revoked_before = stats->invalidated_blocks;
+
+	/* Block 300 lies on the third page of the sweep. */
+	fixture.ram[300 * SWEEP_STRIDE] = 0x24420002;
+	lightrec_invalidate(fixture.state, 300 * SWEEP_STRIDE * 4, 4);
+
+	printf("  walk examined %" PRIu64 " of %" PRIu64 " blocks\n",
+	       stats->invalidation_scans - scans_before, translated);
+	if (stats->invalidated_blocks != revoked_before + 1) {
+		fputs("nearby walk did not revoke the block holding the store\n", stderr);
+		failed = 1;
+	}
+	if (stats->invalidation_scans - scans_before > 2 * (4096u / (SWEEP_STRIDE * 4u)) ||
+	    stats->invalidation_scans - scans_before >= translated / 2) {
+		fputs("a one-word store examined a large share of the whole cache\n", stderr);
+		failed = 1;
+	}
+
+	fixture_destroy(&fixture);
+	return failed;
+}
+
 /* What a report has to state about an invalidation: how many calls were made,
  * how many code words they examined, whether the translated-word test answered
  * a call alone or a walk ran, how many blocks the walk examined, and how many
@@ -553,6 +750,11 @@ static const struct invalidation_case cases[] = {
      test_write_to_untranslated_range_changes_nothing},
     {"overlapping and repeated writes", test_overlapping_and_repeated_writes},
     {"long range revokes every block", test_long_range_revokes_every_block},
+    {"store into revoked then retranslated extent",
+     test_store_into_revoked_then_retranslated_extent},
+    {"store in a later page of a long block", test_store_in_later_page_of_a_long_block},
+    {"guard follows unregistered blocks", test_guard_follows_unregistered_blocks},
+    {"walk examines only nearby blocks", test_walk_examines_only_nearby_blocks},
     {"untranslated range reports what it scanned", test_untranslated_range_reports_what_it_scanned},
     {"code lut entries live inside a block extent",
      test_code_lut_entries_live_inside_a_block_extent},

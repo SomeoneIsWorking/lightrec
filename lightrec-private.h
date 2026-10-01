@@ -114,6 +114,9 @@ struct block {
 	void (*function)(void);
 	const u32 *code;
 	struct block *next;
+	/* The next block whose first word lies in the same code page, chained by
+	 * the block cache so a range invalidation reaches only nearby blocks. */
+	struct block *page_next;
 	u32 pc;
 	u32 hash;
 	u32 precompile_date;

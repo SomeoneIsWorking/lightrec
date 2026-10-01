@@ -16,16 +16,32 @@
 #define LUT_SIZE 0x4000
 
 /* One bit per guest code word, indexed by lut_offset() so that RAM and the BIOS
- * share one compact index exactly as the code LUT does. A set bit means a block
- * was registered over that word; a bit is never cleared, so a word that only
- * ever held translated code can cost one wasted walk later. This is what keeps
- * a store into a region with nothing translated down to a handful of
+ * share one compact index exactly as the code LUT does. A set bit means some
+ * registered block covers that word, and the bit is cleared again when the last
+ * block covering it is unregistered, so a word whose blocks are gone costs no
+ * walk. A block that is only revoked stays registered and keeps its bits: it
+ * revalidates in place, without being registered again. This is what keeps a
+ * store into a region with nothing translated down to a handful of
  * instructions, on a path that runs for every guest store. */
 #define TRANSLATED_WORDS_SIZE (CODE_LUT_SIZE / 8)
+
+/* Registered blocks are also chained by the page their first word lies in, so a
+ * range invalidation looks only at the blocks that can overlap it instead of at
+ * the whole cache. A page is a run of PAGE_WORDS code words in lut_offset()
+ * space. A block belongs to exactly one chain, the page of its first word, and
+ * reaches into the following pages by at most max_block_words. */
+#define PAGE_SHIFT 10
+#define PAGE_WORDS (1u << PAGE_SHIFT)
+#define PAGE_COUNT (CODE_LUT_SIZE >> PAGE_SHIFT)
 
 struct blockcache {
 	struct lightrec_state *state;
 	struct block *lut[LUT_SIZE];
+	struct block *pages[PAGE_COUNT];
+	/* The longest block ever registered, in words. It only grows: it is an
+	 * upper bound on how far before a range a block overlapping it can
+	 * start, so a stale maximum costs a wider look, never a missed block. */
+	u32 max_block_words;
 	u8 translated_words[TRANSLATED_WORDS_SIZE];
 };
 
@@ -45,6 +61,17 @@ static void mark_translated_words(struct blockcache *cache, u32 offset, u32 coun
 		u32 word = offset + i;
 
 		cache->translated_words[word >> 3] |= 1 << (word & 7);
+	}
+}
+
+static void clear_translated_words(struct blockcache *cache, u32 offset, u32 count)
+{
+	u32 i, words = clamp_word_run(offset, count);
+
+	for (i = 0; i < words; i++) {
+		u32 word = offset + i;
+
+		cache->translated_words[word >> 3] &= ~(1 << (word & 7));
 	}
 }
 
@@ -107,6 +134,55 @@ void remove_from_code_lut(struct blockcache *cache, struct block *block)
 	}
 }
 
+static inline u32 page_of_word(u32 word)
+{
+	return word >> PAGE_SHIFT;
+}
+
+static void page_chain_add(struct blockcache *cache, struct block *block)
+{
+	struct block **head = &cache->pages[page_of_word(lut_offset(block->pc))];
+
+	block->page_next = *head;
+	*head = block;
+
+	if (block->nb_ops > cache->max_block_words)
+		cache->max_block_words = block->nb_ops;
+}
+
+static void page_chain_remove(struct blockcache *cache, struct block *block)
+{
+	struct block **link = &cache->pages[page_of_word(lut_offset(block->pc))];
+
+	for (; *link; link = &(*link)->page_next) {
+		if (*link == block) {
+			*link = block->page_next;
+			block->page_next = NULL;
+			return;
+		}
+	}
+}
+
+/* Visit every registered block that can overlap the code words
+ * [first, first + count): those whose first word lies in a page from the one
+ * max_block_words before `first` up to the one holding the last word. This is a
+ * superset of the overlapping blocks, narrowed by the caller's own test. */
+static void for_each_candidate_block(struct blockcache *cache, u32 first, u32 count,
+				     void (*visit)(struct blockcache *, struct block *, void *),
+				     void *arg)
+{
+	u32 reach = first > cache->max_block_words ? first - cache->max_block_words : 0;
+	u32 page, last = page_of_word(first + count - 1);
+	struct block *block, *next;
+
+	for (page = page_of_word(reach); page <= last; page++) {
+		for (block = cache->pages[page]; block; block = next) {
+			next = block->page_next;
+			visit(cache, block, arg);
+		}
+	}
+}
+
 void lightrec_register_block(struct blockcache *cache, struct block *block)
 {
 	u32 pc = kunseg(block->pc);
@@ -118,8 +194,38 @@ void lightrec_register_block(struct blockcache *cache, struct block *block)
 
 	cache->lut[(pc >> 2) & (LUT_SIZE - 1)] = block;
 
+	page_chain_add(cache, block);
 	mark_translated_words(cache, lut_offset(pc), block->nb_ops);
 	remove_from_code_lut(cache, block);
+}
+
+static void remark_overlapping_words(struct blockcache *cache, struct block *other, void *arg)
+{
+	const struct block *gone = arg;
+	u32 begin = lut_offset(gone->pc), end = begin + gone->nb_ops;
+	u32 other_begin = lut_offset(other->pc), other_end = other_begin + other->nb_ops;
+
+	if (other_begin < begin)
+		other_begin = begin;
+	if (other_end > end)
+		other_end = end;
+	if (other_begin < other_end)
+		mark_translated_words(cache, other_begin, other_end - other_begin);
+}
+
+/* A word stays translated while any other registered block still covers it,
+ * so clearing the departed block's run is followed by re-marking whatever the
+ * overlapping blocks still hold. */
+static void release_translated_words(struct blockcache *cache, const struct block *gone)
+{
+	u32 first = lut_offset(gone->pc);
+
+	if (!gone->nb_ops)
+		return;
+
+	clear_translated_words(cache, first, gone->nb_ops);
+	for_each_candidate_block(cache, first, clamp_word_run(first, gone->nb_ops),
+				 remark_overlapping_words, (void *)gone);
 }
 
 void lightrec_unregister_block(struct blockcache *cache, struct block *block)
@@ -129,17 +235,18 @@ void lightrec_unregister_block(struct blockcache *cache, struct block *block)
 
 	if (old == block) {
 		cache->lut[(pc >> 2) & (LUT_SIZE - 1)] = old->next;
-		return;
-	}
-
-	for (; old; old = old->next) {
-		if (old->next == block) {
-			old->next = block->next;
+	} else {
+		for (; old && old->next != block; old = old->next)
+			;
+		if (!old) {
+			pr_err("Block at " PC_FMT " is not in cache\n", block->pc);
 			return;
 		}
+		old->next = block->next;
 	}
 
-	pr_err("Block at " PC_FMT " is not in cache\n", block->pc);
+	page_chain_remove(cache, block);
+	release_translated_words(cache, block);
 }
 
 static bool lightrec_block_is_old(const struct lightrec_state *state, const struct block *block)
@@ -234,23 +341,16 @@ static void lightrec_free_blocks(struct blockcache *cache, const struct block *e
 	lightrec_walk_blocks(cache, &walk);
 }
 
-struct changed_range {
+struct range_revocation {
 	u32 begin;
 	u32 end;
+	unsigned int examined;
+	unsigned int changed;
 };
 
-static _Bool lightrec_block_overlaps_range(struct block *block, const void *arg)
-{
-	const struct changed_range *range = arg;
-
-	return block_overlaps_range(block, range->begin, range->end);
-}
-
-static _Bool lightrec_revoke_block(struct blockcache *cache, struct block *block, void *arg)
+static _Bool lightrec_revoke_block(struct blockcache *cache, struct block *block)
 {
 	struct lightrec_state *state = cache->state;
-
-	(void)arg;
 
 	/* An uncompiled block has no translated code to revoke, and a block whose
 	 * code-LUT span is already clear is already revoked, so a repeated write
@@ -271,14 +371,23 @@ static _Bool lightrec_revoke_block(struct blockcache *cache, struct block *block
 	return true;
 }
 
+static void revoke_if_overlapping(struct blockcache *cache, struct block *block, void *arg)
+{
+	struct range_revocation *revocation = arg;
+
+	revocation->examined++;
+
+	if (!block_overlaps_range(block, revocation->begin, revocation->end))
+		return;
+
+	if (lightrec_revoke_block(cache, block))
+		revocation->changed++;
+}
+
 void lightrec_invalidate_blocks(struct blockcache *cache, u32 addr, u32 len)
 {
 	struct lightrec_execution_stats *stats = &cache->state->execution_stats;
-	struct changed_range range = {.begin = addr};
-	struct block_walk walk = {
-	    .selects = lightrec_block_overlaps_range,
-	    .applies = lightrec_revoke_block,
-	};
+	struct range_revocation revocation = {.begin = addr};
 	u32 first, count;
 
 	stats->invalidations++;
@@ -298,13 +407,11 @@ void lightrec_invalidate_blocks(struct blockcache *cache, u32 addr, u32 len)
 		return;
 	}
 
-	range.end = addr + len;
-	walk.select_arg = &range;
+	revocation.end = addr + len;
+	for_each_candidate_block(cache, first, count, revoke_if_overlapping, &revocation);
 
-	lightrec_walk_blocks(cache, &walk);
-
-	stats->invalidation_scans += walk.examined;
-	stats->invalidated_blocks += walk.changed;
+	stats->invalidation_scans += revocation.examined;
+	stats->invalidated_blocks += revocation.changed;
 }
 
 void lightrec_remove_outdated_blocks(struct blockcache *cache, const struct block *except)
