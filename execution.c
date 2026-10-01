@@ -182,6 +182,11 @@ struct lightrec_registers *lightrec_get_registers(struct lightrec_state *state)
 	return &state->regs;
 }
 
+void *lightrec_get_context(const struct lightrec_state *state)
+{
+	return state->ops.context;
+}
+
 void lightrec_set_cycles_per_opcode(struct lightrec_state *state, u32 cycles)
 {
 	if (state->cycles_per_op == cycles)
