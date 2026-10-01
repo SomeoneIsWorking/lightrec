@@ -210,6 +210,10 @@ struct lightrec_ops {
 	void *block_boundary_data;
 	lightrec_fallback_admission_cb fallback_admission;
 	void *fallback_admission_data;
+	/* The consumer's own object for this state. The memory callbacks receive
+	 * only the state, so this is how they reach their owner without a
+	 * process-wide lookup: lightrec_get_context() returns it. */
+	void *context;
 };
 
 struct lightrec_registers {
@@ -257,6 +261,9 @@ __api void lightrec_set_unsafe_opt_flags(struct lightrec_state *state, u32 flags
 
 __api __cnst struct lightrec_registers *
 lightrec_get_registers(struct lightrec_state *state);
+
+/* The `context` the state was initialised with, or NULL when it had none. */
+__api void *lightrec_get_context(const struct lightrec_state *state);
 
 __api u32 lightrec_current_cycle_count(const struct lightrec_state *state);
 __api void lightrec_reset_cycle_count(struct lightrec_state *state, u32 cycles);

@@ -733,6 +733,101 @@ static int test_nulled_branch_commits_delay_slot_load(void)
 	return 0;
 }
 
+struct context_probe {
+	unsigned int word_loads;
+	const void *seen_context;
+};
+
+static u32 probe_load_word(struct lightrec_state *state, u32 opcode, void *host, u32 addr)
+{
+	struct context_probe *probe = lightrec_get_context(state);
+
+	(void)opcode;
+	(void)host;
+	if (probe) {
+		probe->word_loads++;
+		probe->seen_context = probe;
+	}
+	return 0x5a5a0000 | (addr & 0xffff);
+}
+
+static int test_context_reaches_memory_callbacks(void)
+{
+	static const struct lightrec_mem_map_ops probe_ops = {.lw = probe_load_word,
+							      .lwu = probe_load_word};
+	struct context_probe probe = {0};
+	struct lightrec_ops ops = {
+	    .cop2_op = fixture_cop2_op,
+	    .enable_ram = fixture_enable_ram,
+	    .context = &probe,
+	};
+	struct fixture fixture;
+	struct lightrec_registers *registers;
+	int failed = 0;
+
+	if (fixture_init_ops(&fixture, "lightrec_runtime_contract_test", &ops))
+		return 1;
+	if (lightrec_get_context(fixture.state) != &probe) {
+		fputs("context: the state did not return the context it was given\n", stderr);
+		failed = 1;
+	}
+	fixture_destroy(&fixture);
+
+	/* Same machine, but the RAM map answers loads through a callback: the
+	 * callback must see the context and nothing else. A state initialised
+	 * without a context must report none. */
+	ops.context = NULL;
+	if (fixture_init_ops(&fixture, "lightrec_runtime_contract_test", &ops))
+		return 1;
+	if (lightrec_get_context(fixture.state)) {
+		fputs("context: a state without a context reported one\n", stderr);
+		failed = 1;
+	}
+	fixture_destroy(&fixture);
+
+	ops.context = &probe;
+	fixture = (struct fixture){0};
+	fixture.ram = calloc(1, RAM_SIZE_BYTES);
+	fixture.bios = calloc(1, BIOS_SIZE_BYTES);
+	fixture.scratch = calloc(1, SCRATCH_SIZE_BYTES);
+	if (!fixture.ram || !fixture.bios || !fixture.scratch) {
+		fixture_destroy(&fixture);
+		return 1;
+	}
+	fixture.maps[PSX_MAP_KERNEL_USER_RAM] = (struct lightrec_mem_map){
+	    .pc = 0, .length = RAM_SIZE_BYTES, .address = fixture.ram, .ops = &probe_ops};
+	fixture.maps[PSX_MAP_BIOS] = (struct lightrec_mem_map){
+	    .pc = 0x1fc00000, .length = BIOS_SIZE_BYTES, .address = fixture.bios};
+	fixture.maps[PSX_MAP_SCRATCH_PAD] = (struct lightrec_mem_map){
+	    .pc = 0x1f800000, .length = SCRATCH_SIZE_BYTES, .address = fixture.scratch};
+	fixture.state = lightrec_init("lightrec_runtime_contract_test", fixture.maps,
+				      PSX_MAP_CODE_BUFFER + 1, &ops);
+	if (!fixture.state) {
+		fixture_destroy(&fixture);
+		return 1;
+	}
+
+	/* The base register is live-in, so the address is not a known constant
+	 * and the load cannot be resolved to a direct RAM access. */
+	fixture.ram[0] = 0x8c820040; /* lw $v0, 0x40($a0) */
+	fixture.ram[1] = 0x0000000c; /* syscall */
+	registers = lightrec_get_registers(fixture.state);
+	registers->gpr[4] = 0;
+	lightrec_execute(fixture.state, 0, 100);
+	if (registers->gpr[2] != 0x5a5a0040 || probe.word_loads != 1 ||
+	    probe.seen_context != &probe) {
+		fprintf(stderr,
+			"context: callback loads=%u seen=%p $v0=0x%08" PRIx32 ", expected one load "
+			"through the context and 0x5a5a0040\n",
+			probe.word_loads, probe.seen_context, registers->gpr[2]);
+		failed = 1;
+	}
+	fixture_destroy(&fixture);
+	if (!failed)
+		puts("context: the state's context reaches its memory callbacks");
+	return failed;
+}
+
 int main(void)
 {
 	if (test_exception_context())
@@ -762,6 +857,8 @@ int main(void)
 	if (test_boundary_redirect_replaces_direct_target())
 		return 1;
 	if (test_nulled_branch_commits_delay_slot_load())
+		return 1;
+	if (test_context_reaches_memory_callbacks())
 		return 1;
 	return 0;
 }
