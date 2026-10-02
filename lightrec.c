@@ -1834,6 +1834,31 @@ void lightrec_free_cstate(struct lightrec_cstate *cstate)
 	lightrec_free(cstate->state, MEM_FOR_LIGHTREC, sizeof(*cstate), cstate);
 }
 
+/* The JIT code arena lives in liblightning's GLOBALS, while a lightrec_state does not: init_jit()
+ * allocates one process-wide executable arena and finish_jit() frees it. Pairing those with the
+ * STATE is only correct while a process creates exactly one machine. With several machines live,
+ * the second init_jit() overwrote the globals (leaking the first arena) and the first
+ * lightrec_destroy() freed the arena every other machine was still emitting into and executing
+ * from — a heap corruption abort that had nothing to do with the machine being destroyed.
+ *
+ * So the arena is claimed and released by MACHINE: the first claim owns it, and only the release
+ * of the last machine frees it. Both call sites below (creation, lightrec_destroy, and the creation
+ * error path) go through this pair, so the count returns to zero exactly when no machine is left.
+ */
+static int lightrec_jit_claims;
+
+static void lightrec_jit_claim(const char *argv0)
+{
+	if (lightrec_jit_claims++ == 0)
+		init_jit_with_debug(argv0, stdout);
+}
+
+static void lightrec_jit_release(void)
+{
+	if (--lightrec_jit_claims == 0)
+		finish_jit();
+}
+
 struct lightrec_state * lightrec_init(char *argv0,
 				      const struct lightrec_mem_map *maps,
 				      size_t nb,
@@ -1878,7 +1903,7 @@ struct lightrec_state * lightrec_init(char *argv0,
 	else
 		lut_size = CODE_LUT_SIZE * sizeof(void *);
 
-	init_jit_with_debug(argv0, stdout);
+	lightrec_jit_claim(argv0);
 
 	state = calloc(1, sizeof(*state) + lut_size);
 	if (!state)
@@ -1961,12 +1986,11 @@ err_free_state:
 			    lut_elm_size(state) * CODE_LUT_SIZE);
 	free(state);
 err_finish_jit:
-	finish_jit();
+	lightrec_jit_release();
 	if (ENABLE_CODE_BUFFER && tlsf)
 		tlsf_destroy(tlsf);
 	return NULL;
 }
-
 void lightrec_destroy(struct lightrec_state *state)
 {
 	/* Force a print info on destroy*/
@@ -1979,7 +2003,7 @@ void lightrec_destroy(struct lightrec_state *state)
 
 	lightrec_free_cstate(state->cstate);
 
-	finish_jit();
+	lightrec_jit_release();
 	if (ENABLE_CODE_BUFFER && state->tlsf)
 		tlsf_destroy(state->tlsf);
 
