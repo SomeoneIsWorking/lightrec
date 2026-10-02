@@ -1847,6 +1847,45 @@ void lightrec_free_cstate(struct lightrec_cstate *cstate)
  */
 static int lightrec_jit_claims;
 
+// The code buffer's ALLOCATOR is part of the same shared lifetime as the JIT arena, for the same
+// reason: every machine allocates its translated blocks out of ONE pool, and the pool itself lives
+// at an address the host mapped once. Building a tlsf per state over that one pool gave a process
+// running several machines N allocators handing out the same bytes independently — two machines
+// could be handed overlapping code while each believed the memory was its own. So the allocator is
+// claimed with the arena and released with it.
+void *lightrec_code_tlsf;
+
+static void * lightrec_code_pool_claim(const struct lightrec_mem_map *codebuf_map,
+				       size_t nb, bool *with_32bit_lut,
+				       uintptr_t *pool_addr)
+{
+	if (lightrec_jit_claims == 0) {
+		if (ENABLE_CODE_BUFFER && nb > PSX_MAP_CODE_BUFFER
+		    && codebuf_map->address) {
+			lightrec_code_tlsf = tlsf_create_with_pool(codebuf_map->address,
+								   codebuf_map->length);
+			if (!lightrec_code_tlsf) {
+				pr_err("Unable to initialize code buffer\n");
+				return NULL;
+			}
+
+			if (__WORDSIZE == 64) {
+				*pool_addr = (uintptr_t) codebuf_map->address + codebuf_map->length - 1;
+				*with_32bit_lut = *pool_addr == (u32) *pool_addr;
+			}
+		}
+	}
+	return lightrec_code_tlsf;
+}
+
+static void lightrec_code_pool_release(void)
+{
+	if (lightrec_jit_claims == 0 && ENABLE_CODE_BUFFER && lightrec_code_tlsf) {
+		tlsf_destroy(lightrec_code_tlsf);
+		lightrec_code_tlsf = NULL;
+	}
+}
+
 static void lightrec_jit_claim(const char *argv0)
 {
 	if (lightrec_jit_claims++ == 0)
@@ -1885,16 +1924,11 @@ struct lightrec_state * lightrec_init(char *argv0,
 
 	if (ENABLE_CODE_BUFFER && nb > PSX_MAP_CODE_BUFFER
 	    && codebuf_map->address) {
-		tlsf = tlsf_create_with_pool(codebuf_map->address,
-					     codebuf_map->length);
+		tlsf = lightrec_code_pool_claim(codebuf_map, nb,
+						 &with_32bit_lut, &addr);
 		if (!tlsf) {
 			pr_err("Unable to initialize code buffer\n");
 			return NULL;
-		}
-
-		if (__WORDSIZE == 64) {
-			addr = (uintptr_t) codebuf_map->address + codebuf_map->length - 1;
-			with_32bit_lut = addr == (u32) addr;
 		}
 	}
 
@@ -1987,6 +2021,7 @@ err_free_state:
 	free(state);
 err_finish_jit:
 	lightrec_jit_release();
+	lightrec_code_pool_release();
 	if (ENABLE_CODE_BUFFER && tlsf)
 		tlsf_destroy(tlsf);
 	return NULL;
@@ -2004,8 +2039,8 @@ void lightrec_destroy(struct lightrec_state *state)
 	lightrec_free_cstate(state->cstate);
 
 	lightrec_jit_release();
-	if (ENABLE_CODE_BUFFER && state->tlsf)
-		tlsf_destroy(state->tlsf);
+	/* The code pool is released with the arena, not per state: see lightrec_code_pool_release. */
+	lightrec_code_pool_release();
 
 	lightrec_unregister(MEM_FOR_LIGHTREC, sizeof(*state) +
 			    lut_elm_size(state) * CODE_LUT_SIZE);
