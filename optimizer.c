@@ -1774,6 +1774,18 @@ static int lightrec_flag_io(struct lightrec_state *state, struct block *block)
 				no_mask = (v[list->i.rs].known & ~v[list->i.rs].value
 					   & 0xe0000000) == 0xe0000000;
 
+				/* A map with callbacks observes every store. */
+				if (psx_map != PSX_MAP_UNKNOWN &&
+				    psx_map != PSX_MAP_HW_REGISTERS &&
+				    opcode_is_store(list->c)) {
+					const struct lightrec_mem_map *map = &state->maps[psx_map];
+
+					while (map->mirror_of)
+						map = map->mirror_of;
+					if (map->ops)
+						psx_map = PSX_MAP_UNKNOWN;
+				}
+
 				switch (psx_map) {
 				case PSX_MAP_KERNEL_USER_RAM:
 					if (no_mask)
