@@ -2126,7 +2126,7 @@ static int lightrec_flag_mults_divs(struct lightrec_state *state, struct block *
 	return 0;
 }
 
-static bool remove_div_sequence(struct block *block, unsigned int offset)
+static void remove_div_sequence(struct block *block, unsigned int offset)
 {
 	struct opcode *op;
 	unsigned int i, found = 0;
@@ -2140,9 +2140,8 @@ static bool remove_div_sequence(struct block *block, unsigned int offset)
 	 * For DIV opcodes, this sequence additionally checks that the signed
 	 * operation does not overflow.
 	 *
-	 * With the assumption that the games never crashed the PS1, we can
-	 * therefore assume that the games never divided by zero or overflowed,
-	 * and these sequences can be removed.
+	 * The sequence is removed but the divide keeps its emitted zero check,
+	 * so a zero divisor gets the MIPS result rather than a host trap.
 	 */
 
 	if (is_delay_slot(block->opcode_list, offset - 1)) {
@@ -2155,7 +2154,7 @@ static bool remove_div_sequence(struct block *block, unsigned int offset)
 			pr_debug("Removing DIVU sequence at offset 0x%x\n",
 				 (offset - 2) << 2);
 
-			return true;
+			return;
 		}
 	}
 
@@ -2212,11 +2211,7 @@ static bool remove_div_sequence(struct block *block, unsigned int offset)
 
 		for (i = 0; i < found; i++)
 			block->opcode_list[offset + i].opcode = 0;
-
-		return true;
 	}
-
-	return false;
 }
 
 static int lightrec_remove_div_by_zero_check_sequence(struct lightrec_state *state,
@@ -2229,9 +2224,8 @@ static int lightrec_remove_div_by_zero_check_sequence(struct lightrec_state *sta
 		op = &block->opcode_list[i];
 
 		if (op->i.op == OP_SPECIAL &&
-		    (op->r.op == OP_SPECIAL_DIVU || op->r.op == OP_SPECIAL_DIV) &&
-		    remove_div_sequence(block, i + 1))
-			op->flags |= LIGHTREC_NO_DIV_CHECK;
+		    (op->r.op == OP_SPECIAL_DIVU || op->r.op == OP_SPECIAL_DIV))
+			remove_div_sequence(block, i + 1);
 	}
 
 	return 0;

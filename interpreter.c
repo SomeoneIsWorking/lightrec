@@ -816,6 +816,10 @@ static u32 int_special_DIV(struct interpreter *inter)
 	if (rt == 0) {
 		hi = rs;
 		lo = (rs < 0) * 2 - 1;
+	} else if (rt == -1) {
+		/* INT_MIN / -1 wraps on the R3000A; the host divider would trap. */
+		hi = 0;
+		lo = 0u - (u32)rs;
 	} else {
 		lo = rs / rt;
 		hi = rs % rt;
