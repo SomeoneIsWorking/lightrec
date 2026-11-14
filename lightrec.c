@@ -566,10 +566,14 @@ static void lightrec_mfc_cb(struct lightrec_state *state, union code op)
 {
 	u32 rt = lightrec_mfc(state, op);
 
-	if (op.i.op == OP_SWC2)
+	if (op.i.op == OP_SWC2) {
 		state->temp_reg = rt;
-	else if (op.r.rt)
+	} else if (OPT_HANDLE_LOAD_DELAYS && unlikely(!state->in_delay_slot_n)) {
+		state->temp_reg = rt;
+		state->in_delay_slot_n = 0xff;
+	} else if (op.r.rt) {
 		state->regs.gpr[op.r.rt] = rt;
+	}
 }
 
 static void lightrec_mtc0(struct lightrec_state *state, u8 reg, u32 data)

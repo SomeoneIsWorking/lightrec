@@ -2114,12 +2114,26 @@ static void rec_mfc(struct lightrec_cstate *state, const struct block *block, u1
 {
 	struct regcache *reg_cache = state->reg_cache;
 	union code c = block->opcode_list[offset].c;
+	u32 flags = block->opcode_list[offset].flags;
+	bool load_delay = c.i.op != OP_SWC2 && op_flag_load_delay(flags)
+		&& !state->no_load_delay;
 	jit_state_t *_jit = block->_jit;
+	u8 zero;
 
 	jit_note(__FILE__, __LINE__);
 
-	if (c.i.op != OP_SWC2)
+	if (load_delay) {
+		/* The wrapper writes REG_TEMP for the branch's load-delay
+		 * check instead of the target register. */
+		lightrec_clean_reg_if_loaded(reg_cache, _jit, REG_TEMP, true);
+
+		zero = lightrec_alloc_reg_in(reg_cache, _jit, 0, 0);
+		jit_stxi_c(lightrec_offset(in_delay_slot_n),
+			   LIGHTREC_REG_STATE, zero);
+		lightrec_free_reg(reg_cache, zero);
+	} else if (c.i.op != OP_SWC2) {
 		lightrec_clean_reg_if_loaded(reg_cache, _jit, c.i.rt, true);
+	}
 
 	call_to_c_wrapper(state, block, c.opcode, C_WRAPPER_MFC);
 }
