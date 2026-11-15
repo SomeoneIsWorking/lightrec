@@ -20,6 +20,7 @@ interprets every cold block while compiling in the background.
 | LR-HOST-2 | macOS arm64 native execution | blocked | Requires a maintained MAP_JIT/write-protection arena implementation and signed-app test. |
 | LR-HOST-3 | Android arm64-v8a native execution | blocked | Requires GNU Lightning x18 reservation plus API-21 device/emulator execution test. |
 | LR-HOST-4 | Windows x86_64 native execution | partial | The maintained GNU Lightning fork cross-builds for `x86_64-w64-mingw32` (`build_lightning.py --host`), allocates its buffers with `VirtualAlloc`, and saves all 128 bits of xmm6-xmm15 in a Win64 prolog. The four executable contract tests, cross-built with llvm-mingw, pass under Wine 11 on Linux x86-64 with output identical to the Linux build. Not yet run on a Windows kernel. |
+| LR-HOST-5 | macOS x86_64 native execution | verified | The `macos-x86_64` CI job on `macos-15-intel` builds the Lightning fork (whose NDEBUG build now protects the code buffer executable, b0866b7) and passes its tests, then passes the runtime, invalidation, SMC and cost contract tests (run 43734108292). |
 
 Current focus: integrate the measured execution contract in consumers. The
 maintained GNU Lightning target fixes remain prerequisites before enabling
