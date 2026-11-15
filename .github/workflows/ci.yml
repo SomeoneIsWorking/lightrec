@@ -21,7 +21,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: SomeoneIsWorking/lightning
-          ref: 8138ebae9f5ab23abec1340f0eba00c906c85c78
+          ref: 0a903c9cdd60846576f3f7409d0eddefbbf6a3fa
           path: build/deps/lightning
           fetch-depth: 0
           persist-credentials: false
@@ -46,4 +46,45 @@ jobs:
       - name: Run native runtime and source contracts
         env:
           CMAKE_PREFIX_PATH: ${{ github.workspace }}/build/deps/lightning/build/install/linux-x86_64
+        run: uv run --frozen --no-python-downloads python tools/verify.py
+
+  macos-x86_64:
+    name: macOS x86-64 native dynarec
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check out maintained GNU Lightning
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: SomeoneIsWorking/lightning
+          ref: 0a903c9cdd60846576f3f7409d0eddefbbf6a3fa
+          path: build/deps/lightning
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: recursive
+      - name: Select Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.13.7"
+      - name: Select uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+        with:
+          version: "0.10.12"
+          enable-cache: false
+      - name: Install native build dependencies
+        run: |
+          brew install autoconf automake libtool texinfo ninja llvm
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+      - name: Build the exact maintained GNU Lightning dependency
+        run: >-
+          uv run --project build/deps/lightning --frozen --no-python-downloads python
+          build/deps/lightning/tools/verify.py --clean --cc clang --jobs 3
+      - name: Run native runtime and source contracts
+        env:
+          CMAKE_PREFIX_PATH: ${{ github.workspace }}/build/deps/lightning/build/install/macos-x86_64
         run: uv run --frozen --no-python-downloads python tools/verify.py
