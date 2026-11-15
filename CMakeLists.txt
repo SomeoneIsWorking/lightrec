@@ -46,7 +46,8 @@ set_target_properties(lightrec PROPERTIES
 
 set(BUILD_SHARED_LIBS ON CACHE BOOL "Build shared libraries")
 if (NOT BUILD_SHARED_LIBS)
-	target_compile_definitions(lightrec PRIVATE LIGHTREC_STATIC)
+	# Consumers of the static library must not see lightrec.h's dllimport.
+	target_compile_definitions(lightrec PUBLIC LIGHTREC_STATIC)
 endif (NOT BUILD_SHARED_LIBS)
 
 if (NOT LOG_LEVEL)
@@ -152,7 +153,9 @@ if (BUILD_TESTING)
 	add_test(NAME lightrec_smc_detection COMMAND lightrec_smc_detection_test)
 
 	add_executable(lightrec_invalidation_cost_probe tests/invalidation_cost_probe.c)
-	target_link_libraries(lightrec_invalidation_cost_probe PRIVATE lightrec)
+	# MinGW's clock_gettime lives in winpthreads.
+	find_package(Threads REQUIRED)
+	target_link_libraries(lightrec_invalidation_cost_probe PRIVATE lightrec Threads::Threads)
 	add_test(NAME lightrec_invalidation_cost
 		COMMAND lightrec_invalidation_cost_probe)
 
