@@ -22,7 +22,7 @@ Consumers that bound automatic fallback can install
 guest PC, and host error before any fallback work; refusal exits at that exact
 PC with `LIGHTREC_EXIT_FALLBACK_REFUSED` and executes no interpreter opcode.
 
-Linux x86_64 is the currently proven host. Windows x86_64, macOS arm64, and Android arm64-v8a
+Linux x86_64 and Windows x86_64 are the proven hosts. macOS arm64 and Android arm64-v8a
 are deliberately refused until the GNU Lightning and executable-memory
 requirements in [the runtime contract](docs/runtime-contract.md) are satisfied.
 Upstream provenance is recorded in [docs/upstream.md](docs/upstream.md).
