@@ -12,7 +12,7 @@ CASES = (
     ("Windows", "AMD64", "proven", "runtime contract test"),
     ("Darwin", "x86_64", "proven", "runtime contract test"),
     ("Darwin", "arm64", "refused", "MAP_JIT"),
-    ("Android", "arm64-v8a", "refused", "x18"),
+    ("Android", "aarch64", "proven", "runtime contract test"),
 )
 
 
@@ -55,7 +55,8 @@ def main() -> int:
         if expected not in output or expected_reason not in output:
             print(f"host policy mismatch for {system}/{processor}: {output.strip()}")
             return 1
-    print("host policy passed: 3 proven targets and 2 explicit platform refusals")
+    proven = sum(case[2] == "proven" for case in CASES)
+    print(f"host policy passed: {proven} proven targets and {len(CASES) - proven} explicit platform refusals")
     return 0
 
 
