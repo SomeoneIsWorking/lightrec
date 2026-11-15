@@ -80,6 +80,7 @@ jobs:
         run: |
           brew install autoconf automake libtool texinfo ninja llvm
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix libtool)/libexec/gnubin" >> "$GITHUB_PATH"
       - name: Build the exact maintained GNU Lightning dependency
         run: >-
           uv run --project build/deps/lightning --frozen --no-python-downloads python
