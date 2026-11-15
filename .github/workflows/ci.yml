@@ -21,7 +21,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: SomeoneIsWorking/lightning
-          ref: b0866b7e68d19dc37e5c9726110b8726e8f770fb
+          ref: 7cc8249f2bbdfe475ff1c34f4f8c3f674d0308f2
           path: build/deps/lightning
           fetch-depth: 0
           persist-credentials: false
@@ -62,7 +62,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: SomeoneIsWorking/lightning
-          ref: b0866b7e68d19dc37e5c9726110b8726e8f770fb
+          ref: 7cc8249f2bbdfe475ff1c34f4f8c3f674d0308f2
           path: build/deps/lightning
           fetch-depth: 0
           persist-credentials: false
