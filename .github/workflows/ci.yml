@@ -81,6 +81,9 @@ jobs:
           brew install autoconf automake libtool texinfo ninja llvm
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
           echo "$(brew --prefix libtool)/libexec/gnubin" >> "$GITHUB_PATH"
+          mkdir -p "$RUNNER_TEMP/bin"
+          ln -s "$(brew --prefix llvm)/share/clang/clang-format-diff.py" "$RUNNER_TEMP/bin/clang-format-diff"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Build the exact maintained GNU Lightning dependency
         run: >-
           uv run --project build/deps/lightning --frozen --no-python-downloads python
