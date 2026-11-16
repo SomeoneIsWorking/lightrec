@@ -33,7 +33,13 @@ function(lightrec_require_proven_host)
 		message(FATAL_ERROR "Lightrec host refused: execution counters require a 64-bit host")
 	endif()
 
-	lightrec_classify_host("${CMAKE_SYSTEM_NAME}" "${CMAKE_SYSTEM_PROCESSOR}"
+	# On Darwin CMAKE_SYSTEM_PROCESSOR is the building Mac's; a single CMAKE_OSX_ARCHITECTURES is the target's.
+	set(processor "${CMAKE_SYSTEM_PROCESSOR}")
+	list(LENGTH CMAKE_OSX_ARCHITECTURES architectures)
+	if (CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND architectures EQUAL 1)
+		set(processor "${CMAKE_OSX_ARCHITECTURES}")
+	endif()
+	lightrec_classify_host("${CMAKE_SYSTEM_NAME}" "${processor}"
 		host_class host_reason)
 	if (NOT host_class STREQUAL "proven")
 		message(FATAL_ERROR "Lightrec host refused: ${host_reason}")
